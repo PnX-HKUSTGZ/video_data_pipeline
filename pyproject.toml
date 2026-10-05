@@ -1,0 +1,38 @@
+[project]
+name = "video-dataset-pipeline"
+version = "0.1.0"
+description = "Reproducible video pseudo-labeling for YOLO detection datasets"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "av>=14,<17",
+  "huggingface-hub>=0.34,<1",
+  "ultralytics>=8.3,<9",
+  "torch==2.7.1",
+  "torchvision==0.22.1",
+  "PyYAML>=6,<7",
+]
+
+[project.scripts]
+video-dataset = "video_dataset_pipeline.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.12"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

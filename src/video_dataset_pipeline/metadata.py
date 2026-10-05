@@ -3,7 +3,20 @@
 from typing import Literal, NotRequired, TypedDict
 
 from .config import ConfigValues
-from .records import Split
+from .records import KeypointShape, Split, Task
+
+
+class PoseMetadata(TypedDict):
+    source_kpt_shape: KeypointShape
+    kpt_names: NotRequired[dict[int, list[str]]]
+    flip_idx: NotRequired[list[int]]
+
+
+class KeypointStats(TypedDict):
+    valid_by_index: list[int]
+    missing_by_reason: dict[str, int]
+    valid_points: int
+    missing_points: int
 
 
 class VideoInfo(TypedDict):
@@ -49,11 +62,14 @@ class DatasetSummary(TypedDict):
     class_instances_by_split: dict[Split, dict[str, int]]
     preview_frames: int
     confidence: ConfidenceStats | None
+    no_keypoints_frames: NotRequired[int]
+    keypoints: NotRequired[KeypointStats]
 
 
 class LoaderCount(TypedDict):
     images: int
     instances: int
+    valid_keypoints: NotRequired[int]
 
 
 class ValidationResult(DatasetSummary):
@@ -72,6 +88,8 @@ class RunReport(DatasetSummary):
 
 class RunMetadata(TypedDict):
     schema_version: int
+    task: NotRequired[Task]
+    pose: NotRequired[PoseMetadata]
     run_id: str
     config: ConfigValues
     video: VideoInfo

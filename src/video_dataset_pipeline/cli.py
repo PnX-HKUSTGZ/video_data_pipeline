@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from typing import Literal, cast
 
 from .config import load_config
 from .device import parse_device
@@ -11,14 +12,17 @@ from .util import as_str
 
 def main() -> None:
     """解析命令行，执行模型下载、数据生成或校验，并将结果输出为 JSON。"""
-    parser = argparse.ArgumentParser(description="Generate YOLO detection pseudo-labels from video")
+    parser = argparse.ArgumentParser(
+        description="Generate YOLO detection or pose pseudo-labels from video"
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
     download = subcommands.add_parser(
-        "download-model", help="Download the pinned RM26 detection model"
+        "download-model", help="Download a pinned RM26 detection or pose model"
     )
     download.add_argument("--output", default="models/RM26_engineer_exchange_model")
     download.add_argument("--revision", default=REVISION)
     download.add_argument("--endpoint", help="Optional Hugging Face API endpoint")
+    download.add_argument("--task", choices=("detect", "pose"), default="detect")
     run = subcommands.add_parser("run", help="Sample, label, export and validate")
     run.add_argument("--config", required=True)
     for field in ("input", "output", "model", "model-yaml"):
@@ -35,6 +39,7 @@ def main() -> None:
         "start",
         "end",
         "confidence",
+        "keypoint-confidence",
         "iou",
         "train-fraction",
         "split-gap-seconds",
@@ -56,6 +61,7 @@ def main() -> None:
                 as_str(arguments["output"]),
                 as_str(arguments["revision"]),
                 as_str(arguments["endpoint"]) if arguments["endpoint"] is not None else None,
+                task=cast(Literal["detect", "pose"], arguments["task"]),
             )
         elif command == "run":
             from .pipeline import run_pipeline

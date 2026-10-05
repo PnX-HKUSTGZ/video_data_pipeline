@@ -12,9 +12,17 @@ import cv2
 import numpy as np
 import yaml
 
-from .detection import label_text, split_selected_frames
+from .detection import candidate_status, label_text, split_selected_frames
 from .inference_video import validate_inference_video
-from .metadata import DatasetSummary, LoaderCount, RunReport, SplitInfo, ValidationResult
+from .metadata import (
+    DatasetSummary,
+    LoaderCount,
+    PoseMetadata,
+    RunReport,
+    SplitInfo,
+    ValidationResult,
+)
+from .pose import check_keypoint_shape, filter_keypoints, parse_pose_metadata
 from .records import BGRImage, FrameRecord, Split
 from .util import as_float, as_int, as_mapping, as_str, atomic_bytes, read_json, write_json
 
@@ -77,12 +85,9 @@ def export_records(
         record = replace(source, candidate_image=None)
         split = assignments.get(source.frame_index)
         record.split = split
+        status = candidate_status(record.detections)
         record.status = (
-            "no_detection"
-            if not record.detections
-            else "split_gap"
-            if split is None
-            else "included"
+            status if status != "candidate" else "split_gap" if split is None else "included"
         )
         if record.status == "included":
             if split is None or source.candidate_image is None:
@@ -112,8 +117,13 @@ def check_record_files(root: Path, record: FrameRecord) -> None:
                 raise ValueError(f"Missing artifact: {path}")
 
 
-def annotate_frame(image: BGRImage, record: FrameRecord, names: Mapping[int, str]) -> BGRImage:
-    """在图像副本上绘制检测框、类别、置信度及源时间，供预览和视频共用。"""
+def annotate_frame(
+    image: BGRImage,
+    record: FrameRecord,
+    names: Mapping[int, str],
+    point_names: Mapping[int, Sequence[str]] | None = None,
+) -> BGRImage:
+    """在图像副本上绘制框、有效关键点、名称及源时间，供预览和视频共用。"""
     detections = record.detections
     canvas = image.copy()
     for d in detections:
@@ -129,6 +139,22 @@ def annotate_frame(image: BGRImage, record: FrameRecord, names: Mapping[int, str
             color,
             2,
         )
+        for index, point in enumerate(d.keypoints or ()):
+            if point.visibility == 0:
+                continue
+            px = min(record.width - 1, round(point.xyn[0] * record.width))
+            py = min(record.height - 1, round(point.xyn[1] * record.height))
+            name = point_names[d.class_id][index] if point_names is not None else str(index)
+            cv2.circle(canvas, (px, py), 4, (255, 0, 255), -1)
+            cv2.putText(
+                canvas,
+                name,
+                (px + 5, max(12, py - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 0, 255),
+                1,
+            )
     cv2.putText(
         canvas,
         f"PSEUDO LABEL | t={record.timestamp:.3f}s | {record.status}",
@@ -145,11 +171,18 @@ class Previews:
     """按时间段、类别和检测置信度抽检，预览选择独立于训练集收录规则。"""
 
     def __init__(
-        self, root: Path, names: Mapping[int, str], start: float, end: float, smoke: bool = False
+        self,
+        root: Path,
+        names: Mapping[int, str],
+        start: float,
+        end: float,
+        smoke: bool = False,
+        point_names: Mapping[int, Sequence[str]] | None = None,
     ) -> None:
         """初始化抽检计数；start/end 为相对秒数，smoke 模式保存每个采样帧。"""
         self.root, self.names, self.start, self.end = root, names, start, end
         self.smoke = smoke
+        self.point_names = point_names
         self.counts: Counter[str] = Counter()
 
     def save(self, name: str, image: BGRImage, record: FrameRecord) -> None:
@@ -176,9 +209,16 @@ class Previews:
             reasons.append("low_confidence")
         if not detections and self.counts["no_detection"] < 5:
             reasons.append("no_detection")
+        if record.status == "no_keypoints" and self.counts["no_keypoints"] < 5:
+            reasons.append("no_keypoints")
+        if (
+            any(p.visibility == 0 for d in detections for p in (d.keypoints or ()))
+            and self.counts["missing_keypoints"] < 5
+        ):
+            reasons.append("missing_keypoints")
         if not reasons:
             return
-        canvas = annotate_frame(image, record, self.names)
+        canvas = annotate_frame(image, record, self.names, self.point_names)
         path = Path("previews") / f"{name}.jpg"
         save_jpeg(self.root / path, canvas, 90)
         self.counts.update(reasons)
@@ -186,19 +226,26 @@ class Previews:
         record.preview_reasons = reasons
 
 
-def summarize(records: Sequence[FrameRecord], names: Mapping[int, str]) -> DatasetSummary:
+def summarize(
+    records: Sequence[FrameRecord],
+    names: Mapping[int, str],
+    pose: PoseMetadata | None = None,
+) -> DatasetSummary:
     """汇总帧状态和划分数量，类别目标数与置信度仅统计 included 帧。
 
     confidence_qualified_frames 包含随后被分界间隔排除的有效帧；无入选目标时，
-    confidence 返回 None，便于失败运行也能输出诊断统计。
+    confidence 返回 None，便于失败运行也能输出诊断统计。pose 额外统计无有效点
+    的帧数，以及 included 帧中按索引排列的有效点数量和缺失原因。
     """
     counts = Counter(r.status for r in records)
     splits = Counter(r.split for r in records if r.status == "included")
     classes = Counter(d.class_id for r in records if r.status == "included" for d in r.detections)
     scores = [d.confidence for r in records if r.status == "included" for d in r.detections]
-    return {
+    result: DatasetSummary = {
         "candidate_frames": len(records),
-        "confidence_qualified_frames": sum(bool(r.detections) for r in records),
+        "confidence_qualified_frames": sum(
+            candidate_status(r.detections) == "candidate" for r in records
+        ),
         "included_frames": counts["included"],
         "no_detection_frames": counts["no_detection"],
         "split_gap_frames": counts["split_gap"],
@@ -230,6 +277,23 @@ def summarize(records: Sequence[FrameRecord], names: Mapping[int, str]) -> Datas
         ),
     }
 
+    if pose is not None:
+        points = [
+            d.keypoints or () for r in records if r.status == "included" for d in r.detections
+        ]
+        valid = [
+            sum(ps[i].visibility == 2 for ps in points) for i in range(pose["source_kpt_shape"][0])
+        ]
+        missing = Counter(p.reason for ps in points for p in ps if p.reason is not None)
+        result["no_keypoints_frames"] = counts["no_keypoints"]
+        result["keypoints"] = {
+            "valid_by_index": valid,
+            "valid_points": sum(valid),
+            "missing_points": sum(missing.values()),
+            "missing_by_reason": {str(k): v for k, v in missing.items()},
+        }
+    return result
+
 
 def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> ValidationResult:
     """核对解码完成状态、逐帧划分、图片标签及文件集合，成功后写 validation.json。
@@ -246,6 +310,22 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
         raise ValueError("Frame count differs from completed decode record")
     names = {int(k): as_str(v) for k, v in as_mapping(run["names"]).items()}
     data = as_mapping(yaml.safe_load((root / "data.yaml").read_text()))
+    task = as_str(run.get("task", "detect"))
+    if (task, run.get("schema_version")) not in (("detect", 4), ("pose", 5)):
+        raise ValueError("Unsupported task/schema_version combination")
+    pose = parse_pose_metadata(run["pose"], len(names)) if task == "pose" else None
+    shape = pose["source_kpt_shape"] if pose is not None else None
+    if pose is not None:
+        if data.get("kpt_shape") != [pose["source_kpt_shape"][0], 3]:
+            raise ValueError("Dataset kpt_shape disagrees with run metadata")
+        # JSON 会将类别键转成字符串；复用解析函数比较点名和翻转映射。
+        if (
+            parse_pose_metadata({**data, "kpt_shape": list(pose["source_kpt_shape"])}, len(names))
+            != pose
+        ):
+            raise ValueError("Dataset pose metadata disagrees with run metadata")
+    elif "kpt_shape" in data or "pose" in run:
+        raise ValueError("Detection dataset contains unexpected pose metadata")
     if data["names"] != names or data["train"] != "images/train" or data["val"] != "images/val":
         raise ValueError("data.yaml disagrees with run metadata")
     if Path(as_str(data["path"])).resolve() != root:
@@ -265,13 +345,38 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
             raise ValueError("Manifest timestamps must be increasing")
         previous = record.timestamp
         expected_split = assignments.get(record.frame_index)
+        status = candidate_status(record.detections)
         expected_status = (
-            "no_detection"
-            if not record.detections
+            status
+            if status != "candidate"
             else "split_gap"
             if expected_split is None
             else "included"
         )
+        for detection in record.detections:
+            raw_points = (
+                tuple(p.source for p in detection.keypoints)
+                if detection.keypoints is not None
+                else None
+            )
+            check_keypoint_shape(raw_points, shape)
+            if raw_points is not None:
+                expected_points = filter_keypoints(
+                    raw_points, record.width, record.height, as_float(config["keypoint_confidence"])
+                )
+                for actual, expected in zip(
+                    detection.keypoints or (), expected_points, strict=True
+                ):
+                    if (actual.xyn, actual.visibility, actual.reason) != (
+                        expected.xyn,
+                        expected.visibility,
+                        expected.reason,
+                    ):
+                        raise ValueError(
+                            f"Keypoint filtering mismatch at frame {record.frame_index}"
+                        )
+        for rejected in record.rejected_detections:
+            check_keypoint_shape(rejected.keypoints, shape)
         if record.split != expected_split or record.status != expected_status:
             raise ValueError("Manifest split or inclusion rule mismatch")
         if record.status != "included":
@@ -296,13 +401,25 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
             raise ValueError("Positive-only dataset contains an empty label")
         for line in lines:
             fields = line.split()
-            if len(fields) != 5 or not fields[0].isdigit() or int(fields[0]) not in names:
+            if (
+                len(fields) != (5 + 3 * shape[0] if shape else 5)
+                or not fields[0].isdigit()
+                or int(fields[0]) not in names
+            ):
                 raise ValueError(f"Invalid YOLO class/columns: {line}")
-            x, y, w, h = map(float, fields[1:])
+            x, y, w, h = map(float, fields[1:5])
             if not all(math.isfinite(v) and 0 <= v <= 1 for v in (x, y, w, h)) or min(w, h) <= 0:
                 raise ValueError(f"Invalid normalized box: {line}")
             if min(x - w / 2, y - h / 2) < -1e-8 or max(x + w / 2, y + h / 2) > 1 + 1e-8:
                 raise ValueError("YOLO box lies outside image")
+            for offset in range(5, len(fields), 3):
+                px, py, visibility = map(float, fields[offset : offset + 3])
+                if not all(
+                    math.isfinite(v) and 0 <= v <= 1 for v in (px, py)
+                ) or visibility not in (0, 2):
+                    raise ValueError("Invalid YOLO keypoint coordinates/visibility")
+                if visibility == 0 and (px, py) != (0, 0):
+                    raise ValueError("Missing YOLO keypoint must be (0, 0, 0)")
     actual_files = {
         str(p.relative_to(root))
         for folder in ("images", "labels")
@@ -313,7 +430,7 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
         raise ValueError(f"Dataset artifact set mismatch: {actual_files ^ expected_files}")
     if config.get("save_video", False):
         validate_inference_video(root, records, as_float(run["end"]))
-    summary = summarize(records, names)
+    summary = summarize(records, names, pose)
     if min(summary["splits"].values()) == 0:
         raise ValueError(f"Dataset requires positive samples in both splits: {summary['splits']}")
     loader_counts: dict[Split, LoaderCount] = {}
@@ -327,7 +444,7 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
                 dataset = YOLODataset(
                     img_path=str(root / "images" / split),
                     data=checked,
-                    task="detect",
+                    task=task,
                     imgsz=as_int(config["imgsz"]),
                     augment=False,
                     cache=False,
@@ -343,6 +460,39 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
                 if item["img"].numel() == 0:
                     raise ValueError("Ultralytics returned an empty image tensor")
                 loader_counts[split] = {"images": len(dataset), "instances": instance_count}
+                if pose is not None:
+                    expected_records = {
+                        str(root / r.image): r
+                        for r in records
+                        if r.split == split and r.image is not None
+                    }
+                    valid_points = 0
+                    for loaded in dataset.labels:
+                        source = expected_records[str(loaded["im_file"])]
+                        expected_array = np.array(
+                            [
+                                [(*p.xyn, p.visibility) for p in (d.keypoints or ())]
+                                for d in source.detections
+                            ]
+                        )
+                        actual_array = np.asarray(loaded["keypoints"], dtype=np.float64)
+                        if actual_array.shape != expected_array.shape or not np.allclose(
+                            actual_array, expected_array, atol=1e-7, rtol=0
+                        ):
+                            raise ValueError(
+                                "Ultralytics changed keypoint coordinates or visibility"
+                            )
+                        valid_points += int(np.count_nonzero(actual_array[..., 2]))
+                    tensor = item["keypoints"]
+                    first = expected_records[str(item["im_file"])]
+                    expected_mask = np.array(
+                        [[p.visibility != 0 for p in (d.keypoints or ())] for d in first.detections]
+                    )
+                    if tuple(tensor.shape) != (*expected_mask.shape, 3) or not np.array_equal(
+                        tensor[..., 2].numpy() > 0, expected_mask
+                    ):
+                        raise ValueError("Ultralytics pose tensor shape or mask mismatch")
+                    loader_counts[split]["valid_keypoints"] = valid_points
             finally:
                 (root / "labels" / f"{split}.cache").unlink(missing_ok=True)
     result: ValidationResult = {"valid": True, **summary, "ultralytics_loader": loader_counts}

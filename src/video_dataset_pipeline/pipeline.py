@@ -20,7 +20,7 @@ from .dataset import (
     validate_dataset,
     write_inspection_report,
 )
-from .detection import filter_detections
+from .detection import candidate_status, filter_detections
 from .device import configure_device, gpu_snapshot
 from .inference_video import InferenceVideoWriter
 from .metadata import RunMetadata, RunReport
@@ -52,7 +52,29 @@ def _infer(
         detector = Detector(config, device)
         if detector.names != names:
             raise ValueError("Loaded detector changed the class mapping")
-        previews = Previews(root, names, config.start, frames.end, bool(config.smoke_frames))
+        pose = detector.pose
+        run["task"] = detector.task
+        data: dict[str, object] = {
+            "path": str(root),
+            "train": "images/train",
+            "val": "images/val",
+            "names": names,
+        }
+        point_names = None
+        if pose is not None:
+            run["schema_version"] = 5
+            run["pose"] = pose
+            data["kpt_shape"] = [pose["source_kpt_shape"][0], 3]
+            point_names = pose.get("kpt_names")
+            if point_names is not None:
+                data["kpt_names"] = point_names
+            if "flip_idx" in pose:
+                data["flip_idx"] = pose["flip_idx"]
+        atomic_bytes(root / "data.yaml", yaml.safe_dump(data, allow_unicode=True).encode())
+        write_json(root / "run.json", run)
+        previews = Previews(
+            root, names, config.start, frames.end, bool(config.smoke_frames), point_names
+        )
         prefix = Path(config.input).stem
         first = True
         video_context = (
@@ -73,7 +95,13 @@ def _infer(
                     gpu_snapshot(root, "startup")
                     first = False
                 detections, rejected = filter_detections(
-                    raw, width, height, len(names), config.confidence
+                    raw,
+                    width,
+                    height,
+                    len(names),
+                    config.confidence,
+                    pose["source_kpt_shape"] if pose is not None else None,
+                    config.keypoint_confidence,
                 )
                 record = FrameRecord(
                     frame_index=index,
@@ -81,18 +109,18 @@ def _infer(
                     width=width,
                     height=height,
                     split=None,
-                    status="candidate" if detections else "no_detection",
+                    status=candidate_status(detections),
                     detections=detections,
                     rejected_detections=rejected,
                 )
                 name = f"{prefix}_f{index:08d}"
-                if detections:
+                if record.status == "candidate":
                     path = Path(".staging") / f"{name}.jpg"
                     save_jpeg(root / path, image, config.jpeg_quality)
                     record.candidate_image = str(path)
                 previews.save(name, image, record)
                 if video is not None:
-                    video.write(annotate_frame(image, record, names), timestamp)
+                    video.write(annotate_frame(image, record, names, point_names), timestamp)
                 append_record(manifest, record)
                 records.append(record)
                 if len(records) % 50 == 0:
@@ -153,13 +181,6 @@ def run_pipeline(config: Config) -> RunReport:
     atomic_bytes(
         root / "config.yaml", yaml.safe_dump(config.to_dict(), allow_unicode=True).encode()
     )
-    atomic_bytes(
-        root / "data.yaml",
-        yaml.safe_dump(
-            {"path": str(root), "train": "images/train", "val": "images/val", "names": names},
-            allow_unicode=True,
-        ).encode(),
-    )
     handler = RotatingFileHandler(root / "pipeline.log", maxBytes=10 * 1024 * 1024, backupCount=3)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logging.getLogger().addHandler(handler)
@@ -183,7 +204,7 @@ def run_pipeline(config: Config) -> RunReport:
         )
         write_json(run_path, run)
         report: RunReport = {
-            **summarize(records, names),
+            **summarize(records, names, run.get("pose")),
             "split": split_info,
             "pseudo_labels": True,
             "evaluation_warning": "Teacher predictions are not ground-truth accuracy measurements.",
@@ -194,6 +215,8 @@ def run_pipeline(config: Config) -> RunReport:
         write_json(root / "report.json", report)
         write_inspection_report(root, records, report)
         if config.smoke_frames:
+            if "pose" in run and min(report["splits"].values()) == 0:
+                raise ValueError("Pose smoke check requires positive samples in both splits")
             if len(records) != config.smoke_frames:
                 raise ValueError("Smoke sampling did not produce the requested number of frames")
             for record in records:
@@ -225,7 +248,7 @@ def run_pipeline(config: Config) -> RunReport:
         write_json(
             root / "report.json",
             {
-                **summarize(records, names),
+                **summarize(records, names, run.get("pose")),
                 "status": "failed",
                 "error": run["error"],
                 "decode": run["decode"],

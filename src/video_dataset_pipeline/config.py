@@ -19,6 +19,7 @@ class ConfigValues(TypedDict):
     start: NotRequired[float]
     end: NotRequired[float | None]
     confidence: NotRequired[float]
+    keypoint_confidence: NotRequired[float]
     iou: NotRequired[float]
     imgsz: NotRequired[int]
     train_fraction: NotRequired[float]
@@ -41,6 +42,7 @@ class Config:
     start: float = 0.0
     end: float | None = None
     confidence: float = 0.5
+    keypoint_confidence: float = 0.5
     iou: float = 0.7
     imgsz: int = 640
     train_fraction: float = 0.8
@@ -56,6 +58,7 @@ class Config:
             "sample_fps",
             "start",
             "confidence",
+            "keypoint_confidence",
             "iou",
             "train_fraction",
             "split_gap_seconds",
@@ -68,6 +71,8 @@ class Config:
             raise ValueError("end must be finite and greater than start")
         if not 0 < self.confidence <= 1 or not 0 < self.iou <= 1:
             raise ValueError("confidence and iou must be in (0, 1]")
+        if not 0 <= self.keypoint_confidence <= 1:
+            raise ValueError("keypoint_confidence must be in [0, 1]")
         if not 0 < self.train_fraction < 1:
             raise ValueError("train_fraction must be in (0, 1)")
         if self.imgsz <= 0 or self.imgsz % 32 or not 1 <= self.jpeg_quality <= 100:
@@ -102,7 +107,15 @@ def load_config(path: str | Path, overrides: Mapping[str, object] | None = None)
         if not data.get(key):
             raise ValueError(f"Missing required config field: {key}")
         data[key] = str(Path(as_str(data[key])).resolve())
-    for key in ("sample_fps", "start", "confidence", "iou", "train_fraction", "split_gap_seconds"):
+    for key in (
+        "sample_fps",
+        "start",
+        "confidence",
+        "keypoint_confidence",
+        "iou",
+        "train_fraction",
+        "split_gap_seconds",
+    ):
         if key in data:
             data[key] = as_float(data[key])
     if data.get("end") is not None:

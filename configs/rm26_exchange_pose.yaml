@@ -1,0 +1,17 @@
+input: datasets/rm26_fps_videos/videos/北部赛区/红方/recvlnoyv3arV6_红方工程第一视角.flv
+output: datasets/generated/rm26_exchange_pose/recvlnoyv3arV6
+model: models/RM26_engineer_exchange_model/yolopose/v11.02/best.pt
+model_yaml: models/RM26_engineer_exchange_model/yolopose/v11.02/openvino_best/metadata.yaml
+sample_fps: 2.0
+confidence: 0.5
+keypoint_confidence: 0.5
+iou: 0.7
+imgsz: 640
+start: 0.0
+end: null
+train_fraction: 0.8
+split_gap_seconds: 5.0
+device: 4
+jpeg_quality: 95
+smoke_frames: 0
+save_video: false

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -12,8 +12,11 @@ from .util import as_float, as_int, as_list, as_mapping, as_str
 
 type BGRImage = NDArray[np.uint8]  # H x W x 3, BGR channel order.
 type Box = tuple[float, float, float, float]
+type Point = tuple[float, float]
+type Task = Literal["detect", "pose"]
+type KeypointShape = tuple[int, Literal[2, 3]]
 type Split = Literal["train", "val"]
-type FrameStatus = Literal["candidate", "no_detection", "split_gap", "included"]
+type FrameStatus = Literal["candidate", "no_detection", "no_keypoints", "split_gap", "included"]
 type RejectionReason = Literal[
     "invalid_class",
     "nonfinite_coordinates_or_confidence",
@@ -23,6 +26,74 @@ type RejectionReason = Literal[
 ]
 
 
+type KeypointRejectionReason = Literal[
+    "nonfinite_coordinates", "invalid_confidence", "below_keypoint_confidence", "outside_image"
+]
+
+
+@dataclass(frozen=True)
+class RawKeypoint:
+    """Ultralytics 返回的原图像素点；二维模型没有单点置信度，记为 None。"""
+
+    xy: Point
+    confidence: float | None
+
+    def to_dict(self) -> dict[str, object]:
+        """保存坐标及原始分数，不将分数解释为人工可见性。"""
+        return {"xy": list(self.xy), "confidence": self.confidence}
+
+    @classmethod
+    def from_dict(cls, value: object) -> RawKeypoint:
+        """读取原始点，保留非法数值以便诊断被拒绝的预测。"""
+        data = as_mapping(value)
+        return cls(
+            _read_point(data["xy"]),
+            None if data["confidence"] is None else as_float(data["confidence"]),
+        )
+
+
+@dataclass(frozen=True)
+class Keypoint:
+    """筛选后的点：xyn 为归一化坐标，visibility=2 表示接受的伪标签，0 表示缺失。"""
+
+    source: RawKeypoint
+    xyn: Point
+    visibility: Literal[0, 2]
+    reason: KeypointRejectionReason | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """显式保存原始预测、训练坐标及点筛选原因。"""
+        return {
+            "source": self.source.to_dict(),
+            "xyn": list(self.xyn),
+            "visibility": self.visibility,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> Keypoint:
+        """解析点记录；记录行号由 JSONL 读取边界补充。"""
+        data = as_mapping(value)
+        visibility = as_int(data["visibility"])
+        if visibility not in (0, 2):
+            raise ValueError("Keypoint visibility must be 0 or 2")
+        reason = data["reason"]
+        if reason not in (
+            None,
+            "nonfinite_coordinates",
+            "invalid_confidence",
+            "below_keypoint_confidence",
+            "outside_image",
+        ):
+            raise ValueError("Invalid keypoint rejection reason")
+        return cls(
+            RawKeypoint.from_dict(data["source"]),
+            _read_point(data["xyn"]),
+            cast(Literal[0, 2], visibility),
+            reason,
+        )
+
+
 @dataclass(frozen=True)
 class RawDetection:
     """模型输出的检测结果；xyxy 是原图像素坐标中的 (左, 上, 右, 下)。"""
@@ -30,6 +101,7 @@ class RawDetection:
     class_id: int
     confidence: float
     xyxy: Box
+    keypoints: tuple[RawKeypoint, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +113,7 @@ class Detection:
     xyxy: Box
     source_xyxy: Box
     xywhn: Box
+    keypoints: tuple[Keypoint, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -51,11 +124,12 @@ class RejectedDetection:
     confidence: float
     xyxy: Box
     reason: RejectionReason
+    keypoints: tuple[RawKeypoint, ...] | None = None
 
 
 @dataclass
 class FrameRecord:
-    """单个采样帧的记录；timestamp 为相对秒数，产物路径相对于数据集根目录。"""
+    """单个处理帧的记录；timestamp 为相对秒数，产物路径相对于数据集根目录。"""
 
     frame_index: int
     timestamp: float
@@ -72,7 +146,7 @@ class FrameRecord:
     preview_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
-        """转换为 schema 4 字段，框写为数组，省略未设置的产物路径。
+        """转换为兼容 schema 4/5 的字段，框写为数组，省略未设置的产物路径。
 
         split 即使为 None 也保留；preview_reasons 仅在存在预览时写入，
         使 JSON/JSONL 结构与已有数据集兼容。
@@ -91,6 +165,11 @@ class FrameRecord:
                     "xyxy": list(d.xyxy),
                     "source_xyxy": list(d.source_xyxy),
                     "xywhn": list(d.xywhn),
+                    **(
+                        {"keypoints": [p.to_dict() for p in d.keypoints]}
+                        if d.keypoints is not None
+                        else {}
+                    ),
                 }
                 for d in self.detections
             ],
@@ -100,6 +179,11 @@ class FrameRecord:
                     "confidence": d.confidence,
                     "xyxy": list(d.xyxy),
                     "reason": d.reason,
+                    **(
+                        {"keypoints": [p.to_dict() for p in d.keypoints]}
+                        if d.keypoints is not None
+                        else {}
+                    ),
                 }
                 for d in self.rejected_detections
             ],
@@ -118,7 +202,7 @@ class FrameRecord:
 
     @classmethod
     def from_dict(cls, value: object) -> FrameRecord:
-        """从 schema 4 对象恢复记录，并检查必要字段、值类型及框的长度。
+        """从 schema 4/5 对象恢复记录，并检查必要字段、值类型及框的长度。
 
         这里只校验记录结构；图像配对和划分等规则由数据集校验负责。
         非有限数值仍可读取，以保留被拒绝检测的诊断信息；文件行号由调用方补充。
@@ -128,7 +212,7 @@ class FrameRecord:
         if split not in (None, "train", "val"):
             raise ValueError("Invalid split")
         status = data["status"]
-        if status not in ("candidate", "no_detection", "split_gap", "included"):
+        if status not in ("candidate", "no_detection", "no_keypoints", "split_gap", "included"):
             raise ValueError("Invalid frame status")
         detections = []
         for item in as_list(data["detections"]):
@@ -140,6 +224,9 @@ class FrameRecord:
                     xyxy=_read_box(detection["xyxy"]),
                     source_xyxy=_read_box(detection["source_xyxy"]),
                     xywhn=_read_box(detection["xywhn"]),
+                    keypoints=tuple(Keypoint.from_dict(p) for p in as_list(detection["keypoints"]))
+                    if "keypoints" in detection
+                    else None,
                 )
             )
         rejected = []
@@ -160,6 +247,11 @@ class FrameRecord:
                     confidence=as_float(detection["confidence"]),
                     xyxy=_read_box(detection["xyxy"]),
                     reason=reason,
+                    keypoints=tuple(
+                        RawKeypoint.from_dict(p) for p in as_list(detection["keypoints"])
+                    )
+                    if "keypoints" in detection
+                    else None,
                 )
             )
         return cls(
@@ -187,3 +279,11 @@ def _read_box(value: object) -> Box:
     if len(values) != 4:
         raise ValueError("Expected four box coordinates")
     return as_float(values[0]), as_float(values[1]), as_float(values[2]), as_float(values[3])
+
+
+def _read_point(value: object) -> Point:
+    """将二元素 JSON 数组转换为坐标元组。"""
+    values = as_list(value)
+    if len(values) != 2:
+        raise ValueError("Expected two point coordinates")
+    return as_float(values[0]), as_float(values[1])

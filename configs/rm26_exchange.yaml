@@ -13,3 +13,4 @@ split_gap_seconds: 5.0
 device: 4
 jpeg_quality: 95
 smoke_frames: 0
+save_video: false

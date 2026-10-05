@@ -55,6 +55,10 @@ uv run --locked video-dataset run --config configs/rm26_exchange.yaml \
   --sample-fps 5 --start 100 --end 400 \
   --output datasets/generated/rm26_exchange/custom
 
+# 同时保存带检测框的视频，输出目录需为空
+uv run --locked video-dataset run --config configs/rm26_exchange.yaml \
+  --save-video --output datasets/generated/rm26_exchange/with_video
+
 # 复核已生成的数据集
 uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoyv3arV6
 ```
@@ -62,6 +66,10 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
 默认 2 FPS，置信度阈值 0.5，IoU 阈值 0.7，推理尺寸 640，FP32，保存原始分辨率 JPEG（质量 95）。采用 PTS 顺序抽帧，不通过帧号猜测时间；例如 25 FPS 视频中的 0.5 秒采样点会落到 0.52 秒帧。模型负责 letterbox 与原图坐标映射，额外进行类别内 NMS，使 YOLO26 end-to-end 检测头也遵守配置的 IoU 阈值。
 
 配置中用 `device: 4` 选择 `nvidia-smi` 显示的 GPU4，也可以写 `device: cpu`。命令行通过 `--device 4` 或 `--device cpu` 覆盖。默认配置使用 GPU4；视频在 CPU 解码，不创建显示窗口或 GPU 渲染上下文。
+
+`save_video` 默认是 `false`。设为 `true` 或添加 `--save-video` 后，会在数据集根目录生成 `inference.mp4`；`--no-save-video` 可覆盖配置将其关闭。视频包含所有实际推理的采样帧，包括无检测帧和随后被划分间隔排除的帧，叠加有效检测框、类别、置信度、源时间戳和推理阶段状态。
+
+视频使用 H.264/MP4、无音频，保留采样帧之间的原时间间隔，最后一帧显示至处理区间结尾。默认 2 FPS 推理时，画面也按约 2 FPS 更新；冒烟模式仅包含指定的少量采样帧。保存视频不会增加推理次数或改变数据集筛选规则。编码在 CPU 上流式进行，保持原图尺寸；奇数宽高仅在右侧或底部补一个黑像素以兼容播放器。关闭时不会创建编码器或视频文件。
 
 ## 输出与标注规则
 
@@ -73,6 +81,7 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
   config.yaml              # 生效的绝对路径与参数
   run.json                 # 视频信息、模型和 YAML 路径、类别、解码状态
   inference.jsonl          # 全视频逐帧推理提交记录
+  inference.mp4            # 可选：save_video 开启时保存带框采样视频
   frames.jsonl             # 筛选划分后的时间、框、置信度、文件路径
   report.json              # 数量、类别、置信度统计
   validation.json          # 完整性与真实 Ultralytics 数据加载结果
@@ -97,6 +106,7 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
 - 源视频保持原样；中间仅暂存通过阈值的候选图像，导出通过硬链接复用图像字节。成功或失败退出时均清理暂存目录。
 - 原始视频截断、解码失败、没有有效检测或任一划分为空，都会保留诊断并拒绝写 `COMPLETE.json`。
 - `validate` 检查归一化框、配对、原始分辨率、时间顺序、逐帧记录数量、文件集合，并实际用 `YOLODataset` 加载两组数据和样本张量。只操作本输出目录，临时的 Ultralytics 标签缓存会清除。
+- 启用 `save_video` 时，还会解码检查视频帧数、尺寸、时间戳和时长。视频编码结束后才发布最终 MP4；推理或编码中断时清理视频半成品。
 - 冒烟结果仅生成 `SMOKE_COMPLETE.json`，不宣称得到完整训练数据集。
 - `pipeline.log` 按 10 MiB 轮转并保留 3 个备份；运行结束清除本任务 `.tmp`，失败保留诊断记录。进程退出释放 GPU 上下文。
 - Git 忽略输入视频、生成数据、模型、环境和缓存；现有视频下载任务不属于本 Pipeline，不会被修改。

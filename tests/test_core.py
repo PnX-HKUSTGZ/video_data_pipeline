@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import av
@@ -146,8 +147,15 @@ def synthetic_run(tmp_path, monkeypatch):
     return config, FakeDetector
 
 
-def test_pipeline_uses_configured_model_files_and_protects_existing_output(synthetic_run):
+def test_pipeline_uses_configured_model_files_and_protects_existing_output(
+    synthetic_run, monkeypatch
+):
     config, detector = synthetic_run
+
+    def unexpected_video_writer(*args):
+        raise AssertionError("Default run must not create a video encoder")
+
+    monkeypatch.setattr(pipeline, "InferenceVideoWriter", unexpected_video_writer)
     report = pipeline.run_pipeline(config)
     root = Path(config.output)
     assert detector.calls == 24
@@ -156,6 +164,7 @@ def test_pipeline_uses_configured_model_files_and_protects_existing_output(synth
     assert report["split_gap_frames"] == 2
     assert report["splits"]["val"] > 0
     assert (root / "COMPLETE.json").exists()
+    assert not (root / "inference.mp4").exists()
     run = read_json(root / "run.json")
     assert run["decode"]["decoded_frames"] == 120
     assert run["model"] == config.model
@@ -215,3 +224,35 @@ def test_incomplete_decode_is_not_marked_complete(synthetic_run, monkeypatch):
     root = Path(config.output)
     assert not (root / "COMPLETE.json").exists()
     assert read_json(root / "run.json")["decode"]["decode_complete"] is False
+
+
+@pytest.mark.parametrize("smoke_frames", [0, 6])
+def test_pipeline_video_contains_all_sampled_frames(synthetic_run, smoke_frames):
+    config, _ = synthetic_run
+    config = replace(config, save_video=True, smoke_frames=smoke_frames)
+    report = pipeline.run_pipeline(config)
+    root = Path(config.output)
+    assert report["no_detection_frames"] > 0
+    assert read_json(root / "run.json")["config"]["save_video"] is True
+    with av.open(str(root / "inference.mp4")) as container:
+        stream = container.streams.video[0]
+        assert float(stream.duration * stream.time_base) == pytest.approx(12.0)
+        frames = list(container.decode(stream))
+        assert len(frames) == report["candidate_frames"] == (smoke_frames or 24)
+        assert len(frames) > report["included_frames"]
+    assert not (root / "inference.mp4.tmp").exists()
+    if not smoke_frames:
+        (root / "inference.mp4").unlink()
+        with pytest.raises(FileNotFoundError):
+            validate_dataset(root, False)
+
+
+def test_pipeline_failure_discards_incomplete_video(synthetic_run):
+    config, detector = synthetic_run
+    detector.fail_at = 4
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        pipeline.run_pipeline(replace(config, save_video=True))
+    root = Path(config.output)
+    assert not (root / "inference.mp4").exists()
+    assert not (root / "inference.mp4.tmp").exists()
+    assert not (root / "COMPLETE.json").exists()

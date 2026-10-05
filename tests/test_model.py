@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from video_dataset_pipeline import cli, model
+from video_dataset_pipeline import cli, model, pipeline
 from video_dataset_pipeline.config import load_config
 
 
@@ -67,3 +67,40 @@ def test_cli_rejects_removed_option(monkeypatch):
     with pytest.raises(SystemExit) as result:
         cli.main()
     assert result.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "configured,flag,expected",
+    [
+        (None, None, False),
+        (False, "--save-video", True),
+        (True, None, True),
+        (True, "--no-save-video", False),
+        ("false", None, None),
+    ],
+)
+def test_save_video_config_and_cli_override(tmp_path, monkeypatch, configured, flag, expected):
+    for filename in ("video.mp4", "custom.pt", "custom.yaml"):
+        (tmp_path / filename).touch()
+    values = {
+        "input": str(tmp_path / "video.mp4"),
+        "output": str(tmp_path / "out"),
+        "model": str(tmp_path / "custom.pt"),
+        "model_yaml": str(tmp_path / "custom.yaml"),
+    }
+    if configured is not None:
+        values["save_video"] = configured
+    path = tmp_path / "run.yaml"
+    path.write_text(yaml.safe_dump(values))
+    if expected is None:
+        with pytest.raises(TypeError, match="save_video must be a boolean"):
+            load_config(path)
+        return
+    captured = []
+    monkeypatch.setattr(pipeline, "run_pipeline", lambda config: captured.append(config.save_video))
+    arguments = ["video-dataset", "run", "--config", str(path)]
+    if flag is not None:
+        arguments.append(flag)
+    monkeypatch.setattr("sys.argv", arguments)
+    cli.main()
+    assert captured == [expected]

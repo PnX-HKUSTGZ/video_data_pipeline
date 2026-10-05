@@ -26,6 +26,7 @@ class ConfigValues(TypedDict):
     device: NotRequired[int | str]
     jpeg_quality: NotRequired[int]
     smoke_frames: NotRequired[int]
+    save_video: NotRequired[bool]
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class Config:
     device: int | str = 0
     jpeg_quality: int = 95
     smoke_frames: int = 0
+    save_video: bool = False
 
     def __post_init__(self) -> None:
         """校验采样、阈值和图像参数的范围，并将设备编号字符串转换为整数。"""
@@ -72,6 +74,8 @@ class Config:
             raise ValueError("imgsz must be a positive multiple of 32; JPEG quality is 1..100")
         if self.smoke_frames < 0:
             raise ValueError("smoke_frames must be nonnegative")
+        if not isinstance(self.save_video, bool):
+            raise TypeError("save_video must be a boolean")
         object.__setattr__(self, "device", parse_device(self.device))
 
     def to_dict(self) -> ConfigValues:

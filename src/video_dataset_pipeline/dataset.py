@@ -13,6 +13,7 @@ import numpy as np
 import yaml
 
 from .detection import label_text, split_selected_frames
+from .inference_video import validate_inference_video
 from .metadata import DatasetSummary, LoaderCount, RunReport, SplitInfo, ValidationResult
 from .records import BGRImage, FrameRecord, Split
 from .util import as_float, as_int, as_mapping, as_str, atomic_bytes, read_json, write_json
@@ -111,6 +112,35 @@ def check_record_files(root: Path, record: FrameRecord) -> None:
                 raise ValueError(f"Missing artifact: {path}")
 
 
+def annotate_frame(image: BGRImage, record: FrameRecord, names: Mapping[int, str]) -> BGRImage:
+    """在图像副本上绘制检测框、类别、置信度及源时间，供预览和视频共用。"""
+    detections = record.detections
+    canvas = image.copy()
+    for d in detections:
+        x1, y1, x2, y2 = map(round, d.xyxy)
+        color = (40, 220, 40) if d.class_id % 2 == 0 else (0, 170, 255)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            canvas,
+            f"{names[d.class_id]} {d.confidence:.3f}",
+            (x1, max(22, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            color,
+            2,
+        )
+    cv2.putText(
+        canvas,
+        f"PSEUDO LABEL | t={record.timestamp:.3f}s | {record.status}",
+        (20, 35),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 255, 255),
+        2,
+    )
+    return canvas
+
+
 class Previews:
     """按时间段、类别和检测置信度抽检，预览选择独立于训练集收录规则。"""
 
@@ -148,29 +178,7 @@ class Previews:
             reasons.append("no_detection")
         if not reasons:
             return
-        canvas = image.copy()
-        for d in detections:
-            x1, y1, x2, y2 = map(round, d.xyxy)
-            color = (40, 220, 40) if d.class_id % 2 == 0 else (0, 170, 255)
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(
-                canvas,
-                f"{self.names[d.class_id]} {d.confidence:.3f}",
-                (x1, max(22, y1 - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                color,
-                2,
-            )
-        cv2.putText(
-            canvas,
-            f"PSEUDO LABEL | t={record.timestamp:.3f}s | {record.status}",
-            (20, 35),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 255, 255),
-            2,
-        )
+        canvas = annotate_frame(image, record, self.names)
         path = Path("previews") / f"{name}.jpg"
         save_jpeg(self.root / path, canvas, 90)
         self.counts.update(reasons)
@@ -303,6 +311,8 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
     }
     if actual_files != expected_files:
         raise ValueError(f"Dataset artifact set mismatch: {actual_files ^ expected_files}")
+    if config.get("save_video", False):
+        validate_inference_video(root, records, as_float(run["end"]))
     summary = summarize(records, names)
     if min(summary["splits"].values()) == 0:
         raise ValueError(f"Dataset requires positive samples in both splits: {summary['splits']}")

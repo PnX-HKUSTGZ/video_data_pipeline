@@ -1,6 +1,7 @@
 import logging
 import shutil
 import time
+from contextlib import nullcontext
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from uuid import uuid4
@@ -10,6 +11,7 @@ import yaml
 from .config import Config
 from .dataset import (
     Previews,
+    annotate_frame,
     append_record,
     check_record_files,
     export_records,
@@ -20,6 +22,7 @@ from .dataset import (
 )
 from .detection import filter_detections
 from .device import configure_device, gpu_snapshot
+from .inference_video import InferenceVideoWriter, validate_inference_video
 from .metadata import RunMetadata, RunReport
 from .model import Detector, load_model_names
 from .records import FrameRecord
@@ -41,6 +44,7 @@ def _infer(
 
     仅将有有效检测的原分辨率图像暂存到 .staging，预览按抽检策略独立保存。
     图片落盘后才追加该帧的 inference.jsonl 记录；完整推理结束后再做数据集划分。
+    save_video 开启时还将全部采样帧流式编码为带框视频，包括无检测帧。
     """
     device = configure_device(config.device)
     gpu_snapshot(root, "before")
@@ -51,7 +55,17 @@ def _infer(
         previews = Previews(root, names, config.start, frames.end, bool(config.smoke_frames))
         prefix = Path(config.input).stem
         first = True
-        with (root / "inference.jsonl").open("w", encoding="utf-8") as manifest:
+        video_context = (
+            InferenceVideoWriter(
+                root, frames.info["width"], frames.info["height"], config.sample_fps, frames.end
+            )
+            if config.save_video
+            else nullcontext()
+        )
+        with (
+            (root / "inference.jsonl").open("w", encoding="utf-8") as manifest,
+            video_context as video,
+        ):
             for index, timestamp, image in frames:
                 height, width = image.shape[:2]
                 raw = detector.predict(image)
@@ -77,6 +91,8 @@ def _infer(
                     save_jpeg(root / path, image, config.jpeg_quality)
                     record.candidate_image = str(path)
                 previews.save(name, image, record)
+                if video is not None:
+                    video.write(annotate_frame(image, record, names), timestamp)
                 append_record(manifest, record)
                 records.append(record)
                 if len(records) % 50 == 0:
@@ -177,6 +193,8 @@ def run_pipeline(config: Config) -> RunReport:
                 raise ValueError("Smoke sampling did not produce the requested number of frames")
             for record in records:
                 check_record_files(root, record)
+            if config.save_video:
+                validate_inference_video(root, records, frames.end)
             run["status"] = "smoke_complete"
             write_json(root / "SMOKE_COMPLETE.json", report)
         else:

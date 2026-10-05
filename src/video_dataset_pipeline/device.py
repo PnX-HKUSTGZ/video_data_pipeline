@@ -1,13 +1,14 @@
 import os
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 from .util import atomic_bytes
 
 
-def parse_device(value):
+def parse_device(value: object) -> int | Literal["cpu"]:
     if value == "cpu":
-        return value
+        return "cpu"
     if isinstance(value, str) and value.isascii() and value.isdecimal():
         value = int(value)
     if type(value) is not int or value < 0:
@@ -15,7 +16,7 @@ def parse_device(value):
     return value
 
 
-def gpu_snapshot(output, phase):
+def gpu_snapshot(output: str | Path, phase: str) -> None:
     output = Path(output)
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         return
@@ -36,7 +37,7 @@ def gpu_snapshot(output, phase):
             raise RuntimeError(f"Inference PID is on an unexpected GPU: {line}")
 
 
-def configure_device(device):
+def configure_device(device: int | str) -> Literal["cpu", "0"]:
     # This module deliberately does not import torch or ultralytics.
     device = parse_device(device)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"

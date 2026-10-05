@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import yaml
 
+from .config import Config
 from .dataset import (
     Previews,
     append_record,
@@ -19,14 +20,23 @@ from .dataset import (
 )
 from .detection import filter_detections
 from .device import configure_device, gpu_snapshot
+from .metadata import RunMetadata, RunReport
 from .model import Detector, load_model_names
+from .records import FrameRecord
 from .util import atomic_bytes, write_json
 from .video import VideoFrames, probe_video
 
 LOG = logging.getLogger(__name__)
 
 
-def _infer(config, root, run, names, frames, records):
+def _infer(
+    config: Config,
+    root: Path,
+    run: RunMetadata,
+    names: dict[int, str],
+    frames: VideoFrames,
+    records: list[FrameRecord],
+) -> None:
     device = configure_device(config.device)
     gpu_snapshot(root, "before")
     try:
@@ -46,22 +56,22 @@ def _infer(config, root, run, names, frames, records):
                 detections, rejected = filter_detections(
                     raw, width, height, len(names), config.confidence
                 )
-                record = {
-                    "frame_index": index,
-                    "timestamp": timestamp,
-                    "width": width,
-                    "height": height,
-                    "split": None,
-                    "status": "candidate" if detections else "no_detection",
-                    "detections": detections,
-                    "rejected_detections": rejected,
-                }
+                record = FrameRecord(
+                    frame_index=index,
+                    timestamp=timestamp,
+                    width=width,
+                    height=height,
+                    split=None,
+                    status="candidate" if detections else "no_detection",
+                    detections=detections,
+                    rejected_detections=rejected,
+                )
                 name = f"{prefix}_f{index:08d}"
                 if detections:
                     path = Path(".staging") / f"{name}.jpg"
                     save_jpeg(root / path, image, config.jpeg_quality)
-                    record["candidate_image"] = str(path)
-                record.update(previews.save(name, image, record))
+                    record.candidate_image = str(path)
+                previews.save(name, image, record)
                 append_record(manifest, record)
                 records.append(record)
                 if len(records) % 50 == 0:
@@ -78,16 +88,14 @@ def _infer(config, root, run, names, frames, records):
                 if len(records) % 200 == 0:
                     gpu_snapshot(root, "execution")
         run.update(
-            decode=frames.stats,
-            candidate_frames=len(records),
-            status="exporting",
+            {"decode": frames.stats, "candidate_frames": len(records), "status": "exporting"}
         )
         write_json(root / "run.json", run)
     finally:
         gpu_snapshot(root, "shutdown")
 
 
-def run_pipeline(config):
+def run_pipeline(config: Config) -> RunReport:
     root = Path(config.output)
     root.mkdir(parents=True, exist_ok=True)
     if any(root.iterdir()):
@@ -98,8 +106,8 @@ def run_pipeline(config):
     info = probe_video(config.input)
     frames = VideoFrames(config.input, info, config)
     run_id = uuid4().hex
-    records = []
-    run = {
+    records: list[FrameRecord] = []
+    run: RunMetadata = {
         "schema_version": 4,
         "run_id": run_id,
         "config": config.to_dict(),
@@ -136,12 +144,14 @@ def run_pipeline(config):
             root, records, config.train_fraction, config.split_gap_seconds
         )
         run.update(
-            status="validating",
-            split=split_info,
-            elapsed_seconds_this_attempt=time.monotonic() - started,
+            {
+                "status": "validating",
+                "split": split_info,
+                "elapsed_seconds_this_attempt": time.monotonic() - started,
+            }
         )
         write_json(run_path, run)
-        report = {
+        report: RunReport = {
             **summarize(records, names),
             "split": split_info,
             "pseudo_labels": True,
@@ -178,7 +188,7 @@ def run_pipeline(config):
         return report
     except BaseException as error:
         (root / "COMPLETE.json").unlink(missing_ok=True)
-        run.update(status="failed", error=f"{type(error).__name__}: {error}")
+        run.update({"status": "failed", "error": f"{type(error).__name__}: {error}"})
         run.setdefault("decode", frames.stats)
         write_json(run_path, run)
         write_json(
@@ -200,7 +210,7 @@ def run_pipeline(config):
         handler.close()
 
 
-def _cleanup_staging(root):
+def _cleanup_staging(root: Path) -> None:
     staging = root / ".staging"
     if staging.exists():
         try:

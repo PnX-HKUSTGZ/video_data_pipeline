@@ -2,8 +2,12 @@ import logging
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import TypedDict, cast
 
 import yaml
+
+from .config import Config
+from .records import BGRImage, RawDetection
 
 REPO_ID = "hkustenterprize/RM26_engineer_exchange_model"
 REVISION = "afab41a8b61c399bf71480f0fd52352ed660b994"
@@ -12,7 +16,14 @@ METADATA = "yolo/v10.12/openvino_best/metadata.yaml"
 LOG = logging.getLogger(__name__)
 
 
-def download_model(destination, revision=REVISION, endpoint=None):
+class ModelPaths(TypedDict):
+    model: str
+    model_yaml: str
+
+
+def download_model(
+    destination: str | Path, revision: str = REVISION, endpoint: str | None = None
+) -> ModelPaths:
     """Optional download helper. Inference only needs the two configured local files."""
     destination = Path(destination).resolve()
     endpoints = [endpoint] if endpoint else ["https://huggingface.co", "https://hf-mirror.com"]
@@ -65,53 +76,67 @@ def download_model(destination, revision=REVISION, endpoint=None):
     return {"model": str(destination / WEIGHTS), "model_yaml": str(destination / METADATA)}
 
 
-def load_model_names(path):
-    metadata = yaml.safe_load(Path(path).read_text())
-    names = metadata.get("names") if isinstance(metadata, dict) else None
+def load_model_names(path: str | Path) -> dict[int, str]:
+    metadata: object = yaml.safe_load(Path(path).read_text())
+    names: object = metadata.get("names") if isinstance(metadata, dict) else None
     if isinstance(names, list):
         names = dict(enumerate(names))
     if not isinstance(names, dict) or not names:
         raise ValueError("Model YAML must contain a nonempty 'names' mapping or list")
-    names = {int(k): str(v) for k, v in names.items()}
-    if sorted(names) != list(range(len(names))):
+    result: dict[int, str] = {}
+    for key, value in cast(dict[object, object], names).items():
+        if not isinstance(key, (str, int)):
+            raise TypeError("Model YAML class IDs must be integers")
+        result[int(key)] = str(value)
+    if sorted(result) != list(range(len(result))):
         raise ValueError("Model YAML class IDs must be contiguous and start at zero")
-    return names
+    return result
 
 
 class Detector:
-    def __init__(self, config, device):
+    def __init__(self, config: Config, device: str) -> None:
         import torch
-        from ultralytics import YOLO
+        from ultralytics.models.yolo.model import YOLO
 
         torch.set_num_threads(4)
         self.config, self.device = config, device
         self.model = YOLO(config.model)
         if self.model.task != "detect":
             raise ValueError(f"Expected detection model, got {self.model.task}")
-        self.names = {int(k): str(v) for k, v in self.model.names.items()}
+        self.names: dict[int, str] = {int(k): str(v) for k, v in self.model.names.items()}
         published = load_model_names(config.model_yaml)
         if self.names != published or sorted(self.names) != list(range(len(self.names))):
             raise ValueError("Checkpoint and configured YAML disagree about class ordering")
         if config.imgsz != 640:
             LOG.info("Using configured image size %s (published model size: 640)", config.imgsz)
 
-    def predict(self, image):
+    def predict(self, image: BGRImage) -> list[RawDetection]:
         import torch
-        from torchvision.ops import batched_nms
 
-        result = self.model.predict(
-            image,
-            imgsz=self.config.imgsz,
-            conf=self.config.confidence,
-            iou=self.config.iou,
-            device=self.device,
-            verbose=False,
-            save=False,
-            quantize=32,
-            max_det=300,
+        # torchvision does not ship a py.typed marker.
+        from torchvision.ops import batched_nms  # type: ignore[import-untyped]
+        from ultralytics.engine.results import Results
+
+        # Non-streaming detection returns Results, not embedding tensors or an iterator.
+        result = cast(
+            list[Results],
+            self.model.predict(
+                image,
+                imgsz=self.config.imgsz,
+                conf=self.config.confidence,
+                iou=self.config.iou,
+                device=self.device,
+                verbose=False,
+                save=False,
+                quantize=32,
+                max_det=300,
+                stream=False,
+            ),
         )[0]
         if result.orig_shape != image.shape[:2]:
             raise ValueError("Detector did not return coordinates in the source image space")
+        if result.boxes is None or not isinstance(result.boxes.data, torch.Tensor):
+            raise ValueError("Detector did not return tensor detection boxes")
         boxes = result.boxes.data.detach().cpu()
         if boxes.numel():
             # YOLO26 end-to-end heads do not apply the configurable NMS threshold.
@@ -121,10 +146,10 @@ class Detector:
             )
             boxes = boxes[keep]
         return [
-            {
-                "class_id": int(row[5]),
-                "confidence": float(row[4]),
-                "xyxy": [float(v) for v in row[:4]],
-            }
+            RawDetection(
+                class_id=int(row[5]),
+                confidence=float(row[4]),
+                xyxy=(float(row[0]), float(row[1]), float(row[2]), float(row[3])),
+            )
             for row in boxes.tolist()
         ]

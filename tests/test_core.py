@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import av
@@ -9,8 +10,22 @@ from video_dataset_pipeline import pipeline
 from video_dataset_pipeline.config import Config
 from video_dataset_pipeline.dataset import read_records, validate_dataset
 from video_dataset_pipeline.detection import filter_detections, label_text, split_selected_frames
+from video_dataset_pipeline.records import Detection, FrameRecord, RawDetection
 from video_dataset_pipeline.util import read_json
 from video_dataset_pipeline.video import TimestampSampler
+
+
+def frame_record(index, positive=True):
+    detections = [Detection(0, 0.9, (0, 0, 10, 10), (0, 0, 10, 10), (0.5, 0.5, 1, 1))]
+    return FrameRecord(
+        frame_index=index,
+        timestamp=float(index),
+        width=10,
+        height=10,
+        split=None,
+        status="candidate" if positive else "no_detection",
+        detections=detections if positive else [],
+    )
 
 
 def test_timestamp_sampling_handles_irregular_frames_without_duplicates():
@@ -28,17 +43,14 @@ def test_smoke_samples_cover_interval():
     ("timestamp", "expected"), [(74, "train"), (75, None), (84, None), (85, "val")]
 )
 def test_time_split_embargo(timestamp, expected):
-    records = [{"frame_index": i, "timestamp": i, "detections": [{}]} for i in range(100)]
+    records = [frame_record(i) for i in range(100)]
     assignments, info = split_selected_frames(records, 0.8, 5)
     assert assignments[timestamp] == expected
     assert info["nominal_train_frames"] == 80
 
 
 def test_split_counts_only_confidence_qualified_frames():
-    records = [
-        {"frame_index": i, "timestamp": i, "detections": [{}] if 10 <= i < 20 else []}
-        for i in range(1000)
-    ]
+    records = [frame_record(i, 10 <= i < 20) for i in range(1000)]
     assignments, info = split_selected_frames(records, 0.8, 0)
     assert info["qualified_frames"] == 10
     assert info["boundary_timestamp"] == 17.5
@@ -49,16 +61,16 @@ def test_split_counts_only_confidence_qualified_frames():
 
 def test_boxes_are_clipped_normalized_and_invalid_predictions_rejected():
     raw = [
-        {"class_id": 0, "confidence": 0.8, "xyxy": [-20, 20, 220, 80]},
-        {"class_id": 2, "confidence": 0.8, "xyxy": [1, 1, 10, 10]},
-        {"class_id": 0, "confidence": 0.4, "xyxy": [1, 1, 10, 10]},
-        {"class_id": 0, "confidence": 0.8, "xyxy": [20, 20, 10, 10]},
-        {"class_id": 0, "confidence": float("nan"), "xyxy": [1, 1, 10, 10]},
+        RawDetection(0, 0.8, (-20, 20, 220, 80)),
+        RawDetection(2, 0.8, (1, 1, 10, 10)),
+        RawDetection(0, 0.4, (1, 1, 10, 10)),
+        RawDetection(0, 0.8, (20, 20, 10, 10)),
+        RawDetection(0, float("nan"), (1, 1, 10, 10)),
     ]
     accepted, rejected = filter_detections(raw, 200, 100, 2, 0.5)
     assert len(accepted) == 1
-    assert accepted[0]["xywhn"] == pytest.approx([0.5, 0.5, 1, 0.6])
-    assert accepted[0]["source_xyxy"] == [-20, 20, 220, 80]
+    assert accepted[0].xywhn == pytest.approx([0.5, 0.5, 1, 0.6])
+    assert accepted[0].source_xyxy == (-20, 20, 220, 80)
     assert len(label_text(accepted).split()) == 5
     assert len(rejected) == 4
 
@@ -81,9 +93,9 @@ def test_invalid_config(changes):
 
 def test_frame_records_reject_truncated_data_without_modifying_it(tmp_path):
     path = tmp_path / "frames.jsonl"
-    content = b'{"frame_index": 0}\n{"frame_index":'
+    content = (json.dumps(frame_record(0).to_dict()) + '\n{"frame_index":').encode()
     path.write_bytes(content)
-    with pytest.raises(ValueError, match="Invalid frame record"):
+    with pytest.raises(ValueError, match="Invalid frame record 2"):
         read_records(path)
     assert path.read_bytes() == content
 
@@ -120,7 +132,7 @@ def synthetic_run(tmp_path, monkeypatch):
                 raise RuntimeError("simulated interruption")
             if image.mean() < 20:
                 return []
-            return [{"class_id": 0, "confidence": 0.9, "xyxy": [20, 10, 80, 70]}]
+            return [RawDetection(0, 0.9, (20, 10, 80, 70))]
 
     monkeypatch.setattr(pipeline, "Detector", FakeDetector)
     config = Config(
@@ -153,8 +165,8 @@ def test_pipeline_uses_configured_model_files_and_protects_existing_output(synth
         pipeline.run_pipeline(config)
     assert detector.calls == 24
     assert (root / "frames.jsonl").read_bytes() == original
-    positive = next(r for r in read_records(root / "frames.jsonl") if r["status"] == "included")
-    (root / positive["label"]).write_text("0 0.5 0.5 1 1 0.9\n")
+    positive = next(r for r in read_records(root / "frames.jsonl") if r.status == "included")
+    (root / positive.label).write_text("0 0.5 0.5 1 1 0.9\n")
     with pytest.raises(ValueError, match="Label does not match"):
         validate_dataset(root, False)
 

@@ -6,9 +6,10 @@ from pathlib import Path
 from .config import load_config
 from .device import parse_device
 from .model import REVISION, download_model
+from .util import as_str
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Generate YOLO detection pseudo-labels from video")
     subcommands = parser.add_subparsers(dest="command", required=True)
     download = subcommands.add_parser(
@@ -38,18 +39,21 @@ def main():
         "validate", help="Check labels, artifacts and Ultralytics loading"
     )
     validate.add_argument("dataset", type=Path)
-    arguments = vars(parser.parse_args())
+    arguments: dict[str, object] = vars(parser.parse_args())
     command = arguments.pop("command")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    result: object
     try:
         if command == "download-model":
             result = download_model(
-                arguments["output"], arguments["revision"], arguments["endpoint"]
+                as_str(arguments["output"]),
+                as_str(arguments["revision"]),
+                as_str(arguments["endpoint"]) if arguments["endpoint"] is not None else None,
             )
         elif command == "run":
             from .pipeline import run_pipeline
 
-            config_path = arguments.pop("config")
+            config_path = as_str(arguments.pop("config"))
             result = run_pipeline(load_config(config_path, arguments))
         else:
             from .device import configure_device
@@ -57,9 +61,9 @@ def main():
             configure_device("cpu")
             from .dataset import validate_dataset
 
-            result = validate_dataset(arguments["dataset"])
+            result = validate_dataset(str(arguments["dataset"]))
         print(json.dumps(result, indent=2, ensure_ascii=False))
-    except (ValueError, RuntimeError, OSError) as error:
+    except (ValueError, TypeError, RuntimeError, OSError) as error:
         logging.getLogger(__name__).error("%s", error)
         raise SystemExit(1) from error
 

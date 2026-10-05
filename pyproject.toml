@@ -23,7 +23,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "ruff>=0.12"]
+dev = [
+    "mypy>=1.15,<2",
+    "pytest>=8,<10",
+    "ruff>=0.12",
+    "types-pyyaml>=6.0.12.20260906",
+]
 
 [tool.uv]
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
@@ -42,3 +47,9 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/video_dataset_pipeline"]
+strict = true
+disallow_any_explicit = true

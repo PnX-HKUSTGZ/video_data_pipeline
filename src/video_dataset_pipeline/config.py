@@ -1,10 +1,31 @@
 import math
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
+from typing import NotRequired, TypedDict, cast
 
 import yaml
 
 from .device import parse_device
+from .util import as_float, as_int, as_mapping, as_str
+
+
+class ConfigValues(TypedDict):
+    input: str
+    output: str
+    model: str
+    model_yaml: str
+    sample_fps: NotRequired[float]
+    start: NotRequired[float]
+    end: NotRequired[float | None]
+    confidence: NotRequired[float]
+    iou: NotRequired[float]
+    imgsz: NotRequired[int]
+    train_fraction: NotRequired[float]
+    split_gap_seconds: NotRequired[float]
+    device: NotRequired[int | str]
+    jpeg_quality: NotRequired[int]
+    smoke_frames: NotRequired[int]
 
 
 @dataclass(frozen=True)
@@ -25,7 +46,7 @@ class Config:
     jpeg_quality: int = 95
     smoke_frames: int = 0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         for key in (
             "sample_fps",
             "start",
@@ -50,21 +71,31 @@ class Config:
             raise ValueError("smoke_frames must be nonnegative")
         object.__setattr__(self, "device", parse_device(self.device))
 
-    def to_dict(self):
-        return asdict(self)
+    def to_dict(self) -> ConfigValues:
+        return cast(ConfigValues, asdict(self))
 
 
-def load_config(path, overrides=None):
-    data = yaml.safe_load(Path(path).read_text()) or {}
+def load_config(path: str | Path, overrides: Mapping[str, object] | None = None) -> Config:
+    data = as_mapping(yaml.safe_load(Path(path).read_text()) or {})
     allowed = {f.name for f in fields(Config)}
+    data.update({k: v for k, v in (overrides or {}).items() if v is not None})
     if unknown := set(data) - allowed:
         raise ValueError(f"Unknown config keys: {sorted(unknown)}")
-    data.update({k: v for k, v in (overrides or {}).items() if v is not None})
     for key in ("input", "output", "model", "model_yaml"):
         if not data.get(key):
             raise ValueError(f"Missing required config field: {key}")
-        data[key] = str(Path(data[key]).resolve())
-    config = Config(**data)
+        data[key] = str(Path(as_str(data[key])).resolve())
+    for key in ("sample_fps", "start", "confidence", "iou", "train_fraction", "split_gap_seconds"):
+        if key in data:
+            data[key] = as_float(data[key])
+    if data.get("end") is not None:
+        data["end"] = as_float(data["end"])
+    for key in ("imgsz", "jpeg_quality", "smoke_frames"):
+        if key in data:
+            data[key] = as_int(data[key])
+    if "device" in data:
+        data["device"] = parse_device(data["device"])
+    config = Config(**cast(ConfigValues, data))
     if not Path(config.input).is_file():
         raise ValueError(f"Input video missing: {config.input}")
     for key in ("model", "model_yaml"):

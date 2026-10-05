@@ -14,6 +14,11 @@ from .util import as_int, as_list, as_mapping, as_str
 
 
 def probe_video(path: str | Path) -> VideoInfo:
+    """通过 ffprobe 读取首个视频流的尺寸、帧率、时长和起始时间。
+
+    时间单位为秒；流未提供时长时，用容器时长减去流起始时间估算。
+    非正帧率或时长会被拒绝，后续采样以这些信息检查范围和解码完整性。
+    """
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
         check=True,
@@ -44,7 +49,10 @@ def probe_video(path: str | Path) -> VideoInfo:
 
 
 class TimestampSampler:
+    """对按时间递增输入的帧维护采样进度，不持有图像数据。"""
+
     def __init__(self, fps: float, start: float, end: float, smoke_frames: int = 0) -> None:
+        """设置秒单位的 [start, end) 区间；冒烟模式改为均匀分布的固定数量采样点。"""
         self.fps, self.start, self.end = fps, start, end
         self.index = 0
         self.targets = (
@@ -54,6 +62,11 @@ class TimestampSampler:
         )
 
     def accepts(self, timestamp: float) -> bool:
+        """判断当前帧是否到达下一个采样点，并在接受时推进内部进度。
+
+        timestamp 与 start/end 使用同一时间基准。普通模式跳过已错过的采样点，
+        每次调用最多接受当前帧一次，不为跨过的多个采样点重复输出同一图像。
+        """
         if timestamp < self.start - 1e-7 or timestamp >= self.end - 1e-7:
             return False
         if self.targets is not None:
@@ -69,7 +82,10 @@ class TimestampSampler:
 
 
 class VideoFrames:
+    """顺序解码视频并按 PTS 抽帧，stats 记录本次迭代的解码进度。"""
+
     def __init__(self, path: str | Path, info: VideoInfo, config: Config) -> None:
+        """将结束时间限制在视频时长内，并拒绝空区间或超过源帧率的抽帧率。"""
         self.path, self.info, self.config = Path(path), info, config
         self.end = min(config.end if config.end is not None else info["duration"], info["duration"])
         if config.start >= self.end or config.sample_fps > info["fps"] + 1e-6:
@@ -81,6 +97,11 @@ class VideoFrames:
         }
 
     def __iter__(self) -> Iterator[tuple[int, float, BGRImage]]:
+        """流式返回从零开始的源帧号、相对时间秒数和原分辨率 uint8 BGR 图像。
+
+        时间原点使用视频流起始 PTS，缺失时使用首帧 PTS。损坏帧、缺失或不递增
+        的时间戳以及提前结束都会报错；迭代正常耗尽后才设置 decode_complete。
+        """
         sampler = TimestampSampler(
             self.config.sample_fps, self.config.start, self.end, self.config.smoke_frames
         )

@@ -25,6 +25,8 @@ type RejectionReason = Literal[
 
 @dataclass(frozen=True)
 class RawDetection:
+    """模型输出的检测结果；xyxy 是原图像素坐标中的 (左, 上, 右, 下)。"""
+
     class_id: int
     confidence: float
     xyxy: Box
@@ -32,6 +34,8 @@ class RawDetection:
 
 @dataclass(frozen=True)
 class Detection:
+    """有效检测：xyxy 为裁剪框，source_xyxy 为原始框，xywhn 为归一化中心和宽高。"""
+
     class_id: int
     confidence: float
     xyxy: Box
@@ -41,6 +45,8 @@ class Detection:
 
 @dataclass(frozen=True)
 class RejectedDetection:
+    """未通过筛选的检测，保留原始像素框、置信度及拒绝原因供诊断。"""
+
     class_id: int
     confidence: float
     xyxy: Box
@@ -49,6 +55,8 @@ class RejectedDetection:
 
 @dataclass
 class FrameRecord:
+    """单个采样帧的记录；timestamp 为相对秒数，产物路径相对于数据集根目录。"""
+
     frame_index: int
     timestamp: float
     width: int
@@ -64,6 +72,11 @@ class FrameRecord:
     preview_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
+        """转换为 schema 4 字段，框写为数组，省略未设置的产物路径。
+
+        split 即使为 None 也保留；preview_reasons 仅在存在预览时写入，
+        使 JSON/JSONL 结构与已有数据集兼容。
+        """
         record: dict[str, object] = {
             "frame_index": self.frame_index,
             "timestamp": self.timestamp,
@@ -105,6 +118,11 @@ class FrameRecord:
 
     @classmethod
     def from_dict(cls, value: object) -> FrameRecord:
+        """从 schema 4 对象恢复记录，并检查必要字段、值类型及框的长度。
+
+        这里只校验记录结构；图像配对和划分等规则由数据集校验负责。
+        非有限数值仍可读取，以保留被拒绝检测的诊断信息；文件行号由调用方补充。
+        """
         data = as_mapping(value)
         split = data["split"]
         if split not in (None, "train", "val"):
@@ -164,6 +182,7 @@ class FrameRecord:
 
 
 def _read_box(value: object) -> Box:
+    """将四元素 JSON 数组转换为浮点元组，拒绝字符串或布尔值坐标。"""
     values = as_list(value)
     if len(values) != 4:
         raise ValueError("Expected four box coordinates")

@@ -12,6 +12,12 @@ def filter_detections(
     class_count: int,
     confidence: float,
 ) -> tuple[list[Detection], list[RejectedDetection]]:
+    """筛选原图像素坐标中的检测框，返回有效检测与带原因的拒绝检测。
+
+    width/height 为原图尺寸；置信度达到 confidence 才保留。有效框先裁剪到
+    图像边界，再计算归一化中心坐标与宽高，同时保留裁剪前的 source_xyxy。
+    空框、越界类别和非法数值会被拒绝，输入检测对象保持原样。
+    """
     accepted: list[Detection] = []
     rejected: list[RejectedDetection] = []
     for detection in detections:
@@ -56,7 +62,13 @@ def filter_detections(
 def split_selected_frames(
     records: Sequence[FrameRecord], train_fraction: float, gap: float
 ) -> tuple[dict[int, Split | None], SplitInfo]:
-    """Partition confidence-qualified frames in temporal order, then embargo the boundary."""
+    """按有效帧数量划分训练/验证集，再排除时间分界附近的帧。
+
+    records 须按时间递增排列，仅有检测的帧参与比例计算。分界取两组相邻帧
+    时间的中点，排除区间为 [分界 - gap, 分界 + gap)，gap 的单位为秒。
+    返回帧号到划分的映射及统计：排除帧映射为 None，无检测帧不进入映射。
+    样本不足时可能有空划分，由后续数据集校验拒绝。
+    """
     selected = [record for record in records if record.detections]
     split_index = min(max(1, math.floor(len(selected) * train_fraction)), len(selected))
     boundary = (
@@ -81,6 +93,7 @@ def split_selected_frames(
 
 
 def label_text(detections: Sequence[Detection]) -> str:
+    """将已筛选的检测编码为 YOLO 五列标签，每行以换行符结束，不包含置信度。"""
     return "".join(
         f"{d.class_id} " + " ".join(f"{x:.9f}" for x in d.xywhn) + "\n" for d in detections
     )

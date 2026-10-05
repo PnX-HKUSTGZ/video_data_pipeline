@@ -30,6 +30,8 @@ class ConfigValues(TypedDict):
 
 @dataclass(frozen=True)
 class Config:
+    """单次运行参数；时间以秒计，device 使用物理 GPU 编号或 'cpu'。"""
+
     input: str
     output: str
     model: str
@@ -47,6 +49,7 @@ class Config:
     smoke_frames: int = 0
 
     def __post_init__(self) -> None:
+        """校验采样、阈值和图像参数的范围，并将设备编号字符串转换为整数。"""
         for key in (
             "sample_fps",
             "start",
@@ -72,10 +75,16 @@ class Config:
         object.__setattr__(self, "device", parse_device(self.device))
 
     def to_dict(self) -> ConfigValues:
+        """返回包含默认值在内的生效配置，供运行配置和元数据写入使用。"""
         return cast(ConfigValues, asdict(self))
 
 
 def load_config(path: str | Path, overrides: Mapping[str, object] | None = None) -> Config:
+    """读取 YAML 并应用非 None 的命令行覆盖值，返回已校验的配置。
+
+    相对路径以当前工作目录为基准，转换为绝对路径；同时检查输入视频、权重和
+    类别 YAML 存在。未知字段或错误值会报错，输出目录是否为空由运行入口检查。
+    """
     data = as_mapping(yaml.safe_load(Path(path).read_text()) or {})
     allowed = {f.name for f in fields(Config)}
     data.update({k: v for k, v in (overrides or {}).items() if v is not None})

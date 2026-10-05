@@ -10,6 +10,7 @@ from .util import as_str
 
 
 def main() -> None:
+    """解析命令行，执行模型下载、数据生成或校验，并将结果输出为 JSON。"""
     parser = argparse.ArgumentParser(description="Generate YOLO detection pseudo-labels from video")
     subcommands = parser.add_subparsers(dest="command", required=True)
     download = subcommands.add_parser(

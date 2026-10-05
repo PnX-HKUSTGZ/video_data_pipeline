@@ -24,7 +24,11 @@ class ModelPaths(TypedDict):
 def download_model(
     destination: str | Path, revision: str = REVISION, endpoint: str | None = None
 ) -> ModelPaths:
-    """Optional download helper. Inference only needs the two configured local files."""
+    """下载指定 revision 的权重和类别 YAML，返回两个本地文件的绝对路径。
+
+    已有文件直接复用；未指定 endpoint 时依次尝试官方站点与镜像。
+    下载通过临时文件完成，失败时清理临时文件并报错。
+    """
     destination = Path(destination).resolve()
     endpoints = [endpoint] if endpoint else ["https://huggingface.co", "https://hf-mirror.com"]
     for filename in (WEIGHTS, METADATA):
@@ -77,6 +81,7 @@ def download_model(
 
 
 def load_model_names(path: str | Path) -> dict[int, str]:
+    """读取 YAML 的 names 列表或映射，要求类别编号从 0 连续排列且非空。"""
     metadata: object = yaml.safe_load(Path(path).read_text())
     names: object = metadata.get("names") if isinstance(metadata, dict) else None
     if isinstance(names, list):
@@ -94,7 +99,14 @@ def load_model_names(path: str | Path) -> dict[int, str]:
 
 
 class Detector:
+    """指定 RM26 检测权重的适配器，向核心流程返回具有明确类型的原图检测框。"""
+
     def __init__(self, config: Config, device: str) -> None:
+        """加载权重并核对检测任务和类别顺序；调用前必须完成设备配置。
+
+        device 使用 configure_device 返回的框架内编号，例如隔离 GPU 后的 '0'。
+        权重类别与配置 YAML 不一致时拒绝继续推理。
+        """
         import torch
         from ultralytics.models.yolo.model import YOLO
 
@@ -111,6 +123,11 @@ class Detector:
             LOG.info("Using configured image size %s (published model size: 640)", config.imgsz)
 
     def predict(self, image: BGRImage) -> list[RawDetection]:
+        """对单张原分辨率 BGR 图像推理，返回像素坐标框、类别和置信度。
+
+        Ultralytics 负责缩放及坐标还原；这里额外执行类别内 NMS，使配置的 IoU
+        阈值对 YOLO26 端到端检测头同样生效。后续筛选负责裁剪与归一化。
+        """
         import torch
 
         # torchvision does not ship a py.typed marker.

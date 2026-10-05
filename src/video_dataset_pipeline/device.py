@@ -7,6 +7,7 @@ from .util import atomic_bytes
 
 
 def parse_device(value: object) -> int | Literal["cpu"]:
+    """接受非负 GPU 编号、其数字字符串或 'cpu'，拒绝布尔值等其他输入。"""
     if value == "cpu":
         return "cpu"
     if isinstance(value, str) and value.isascii() and value.isdecimal():
@@ -17,6 +18,11 @@ def parse_device(value: object) -> int | Literal["cpu"]:
 
 
 def gpu_snapshot(output: str | Path, phase: str) -> None:
+    """保存完整 GPU 状态，并检查本进程是否出现在未选中的物理 GPU 上。
+
+    CPU 模式跳过检查；同一 phase 的快照写入同名文件并覆盖旧内容。
+    快照包含其他进程以供核对，但只对本进程的设备位置作判断。
+    """
     output = Path(output)
     if not os.environ.get("CUDA_VISIBLE_DEVICES"):
         return
@@ -38,6 +44,11 @@ def gpu_snapshot(output: str | Path, phase: str) -> None:
 
 
 def configure_device(device: int | str) -> Literal["cpu", "0"]:
+    """在导入 PyTorch/Ultralytics 之前设置设备可见性和运行环境。
+
+    输入编号对应 nvidia-smi 的物理 GPU，内部按 UUID 隔离后返回框架内编号 '0'；
+    CPU 模式隐藏所有 GPU 并返回 'cpu'。设备不存在或空闲显存不足 4 GiB 时报错。
+    """
     # This module deliberately does not import torch or ultralytics.
     device = parse_device(device)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"

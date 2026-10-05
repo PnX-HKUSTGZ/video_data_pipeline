@@ -37,6 +37,11 @@ def _infer(
     frames: VideoFrames,
     records: list[FrameRecord],
 ) -> None:
+    """逐帧推理并写入清单，同时更新传入的 run 和 records。
+
+    仅将有有效检测的原分辨率图像暂存到 .staging，预览按抽检策略独立保存。
+    图片落盘后才追加该帧的 inference.jsonl 记录；完整推理结束后再做数据集划分。
+    """
     device = configure_device(config.device)
     gpu_snapshot(root, "before")
     try:
@@ -96,6 +101,11 @@ def _infer(
 
 
 def run_pipeline(config: Config) -> RunReport:
+    """在空输出目录中执行采样、标注、划分、导出与校验，返回统计报告。
+
+    完整数据集通过校验后才写 COMPLETE.json；冒烟运行仅写 SMOKE_COMPLETE.json。
+    推理及后续处理失败时保留诊断并抛出异常，退出时清理暂存图像和临时文件。
+    """
     root = Path(config.output)
     root.mkdir(parents=True, exist_ok=True)
     if any(root.iterdir()):
@@ -211,6 +221,7 @@ def run_pipeline(config: Config) -> RunReport:
 
 
 def _cleanup_staging(root: Path) -> None:
+    """删除本次运行的暂存图像；清理失败只记录警告，避免覆盖原始处理异常。"""
     staging = root / ".staging"
     if staging.exists():
         try:

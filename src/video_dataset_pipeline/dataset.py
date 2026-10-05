@@ -21,6 +21,11 @@ SPLITS: tuple[Split, Split] = ("train", "val")
 
 
 def read_records(path: str | Path) -> list[FrameRecord]:
+    """读取 JSONL 帧清单，要求帧号唯一且递增，每行具有完整记录和末尾换行。
+
+    文件不存在时返回空列表。解析或字段类型错误会报告从 1 开始的行号，
+    不修改源文件，也不截断或跳过坏记录。
+    """
     path = Path(path)
     if not path.exists():
         return []
@@ -42,12 +47,14 @@ def read_records(path: str | Path) -> list[FrameRecord]:
 
 
 def append_record(stream: TextIO, record: FrameRecord) -> None:
+    """向已打开的文件追加一条完整 JSONL 记录，并 flush/fsync 使其落盘。"""
     stream.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
     stream.flush()
     os.fsync(stream.fileno())
 
 
 def save_jpeg(path: str | Path, image: BGRImage, quality: int) -> None:
+    """将 BGR 图像编码后原子写入 JPEG，支持中文路径；quality 取值为 1..100。"""
     success, data = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not success:
         raise ValueError(f"JPEG encoding failed: {path}")
@@ -57,6 +64,12 @@ def save_jpeg(path: str | Path, image: BGRImage, quality: int) -> None:
 def export_records(
     root: Path, inference: Sequence[FrameRecord], train_fraction: float, gap: float
 ) -> tuple[list[FrameRecord], SplitInfo]:
+    """从按时间排序的推理记录导出图片、标签和最终帧清单。
+
+    返回记录副本及划分统计，不修改传入记录。入选图片通过硬链接复用暂存
+    图像字节，要求目标 images/labels 子目录已创建且与暂存目录位于同一文件系统。
+    最终清单保留无检测及分界排除记录，但移除所有 candidate_image 暂存路径。
+    """
     assignments, split_info = split_selected_frames(inference, train_fraction, gap)
     records = []
     for source in inference:
@@ -90,6 +103,7 @@ def export_records(
 
 
 def check_record_files(root: Path, record: FrameRecord) -> None:
+    """检查记录声明的各产物路径在 root 下存在；不负责解码图片或验证标签内容。"""
     for relative in (record.image, record.label, record.preview, record.candidate_image):
         if relative is not None:
             path = root / relative
@@ -98,14 +112,22 @@ def check_record_files(root: Path, record: FrameRecord) -> None:
 
 
 class Previews:
+    """按时间段、类别和检测置信度抽检，预览选择独立于训练集收录规则。"""
+
     def __init__(
         self, root: Path, names: Mapping[int, str], start: float, end: float, smoke: bool = False
     ) -> None:
+        """初始化抽检计数；start/end 为相对秒数，smoke 模式保存每个采样帧。"""
         self.root, self.names, self.start, self.end = root, names, start, end
         self.smoke = smoke
         self.counts: Counter[str] = Counter()
 
     def save(self, name: str, image: BGRImage, record: FrameRecord) -> None:
+        """命中抽检条件时保存预览，并更新 record 的预览路径和入选原因。
+
+        覆盖 20 个时间桶、各类别、低置信度和无检测样例，因此未收录的数据帧
+        也可能有预览。绘制发生在图像副本上；未命中条件时不修改记录或保存图片。
+        """
         reasons = []
         bucket = min(19, int(20 * (record.timestamp - self.start) / (self.end - self.start)))
         if self.counts[f"time_{bucket}"] == 0:
@@ -157,6 +179,11 @@ class Previews:
 
 
 def summarize(records: Sequence[FrameRecord], names: Mapping[int, str]) -> DatasetSummary:
+    """汇总帧状态和划分数量，类别目标数与置信度仅统计 included 帧。
+
+    confidence_qualified_frames 包含随后被分界间隔排除的有效帧；无入选目标时，
+    confidence 返回 None，便于失败运行也能输出诊断统计。
+    """
     counts = Counter(r.status for r in records)
     splits = Counter(r.split for r in records if r.status == "included")
     classes = Counter(d.class_id for r in records if r.status == "included" for d in r.detections)
@@ -197,6 +224,12 @@ def summarize(records: Sequence[FrameRecord], names: Mapping[int, str]) -> Datas
 
 
 def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> ValidationResult:
+    """核对解码完成状态、逐帧划分、图片标签及文件集合，成功后写 validation.json。
+
+    任一划分无有效样本或产物不一致都会报错。默认还用 Ultralytics 实际加载
+    两个划分并读取样本张量，随后清理它生成的标签缓存；关闭该项仅跳过加载检查。
+    这里验证的是数据格式和内部一致性，不能衡量伪标签的真实识别精度。
+    """
     root = Path(root).resolve()
     run = as_mapping(read_json(root / "run.json"))
     config = as_mapping(run["config"])
@@ -308,6 +341,7 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
 
 
 def write_inspection_report(root: Path, records: Sequence[FrameRecord], report: RunReport) -> None:
+    """为已有预览生成 HTML 索引，以及最多 24 张预览组成的缩略图拼图。"""
     preview_records = [record for record in records if record.preview is not None]
     cards, tiles = [], []
     for record in preview_records:

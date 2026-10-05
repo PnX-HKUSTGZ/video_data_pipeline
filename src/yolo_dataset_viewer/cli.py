@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="只读浏览标准 YOLO 数据集（检测/分割/OBB/姿态）")
+    parser = argparse.ArgumentParser(description="浏览标准 YOLO 数据集，并差分编辑检测与姿态标注")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))

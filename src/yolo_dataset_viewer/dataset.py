@@ -57,6 +57,8 @@ class DatasetSpec:
     names: dict[int, str]
     kpt_shape: tuple[int, int] | None
     sources: dict[str, list[Path]]
+    config_path: Path | None = None
+    config_data: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -231,7 +233,15 @@ def resolve_spec(request: OpenRequest) -> DatasetSpec:
                 sources[split] = [root / split]
         if not sources:
             sources["all"] = [root / "images" if (root / "images").is_dir() else root]
-    return DatasetSpec(root=root, task=request.task, names=names, kpt_shape=shape, sources=sources)
+    return DatasetSpec(
+        root=root,
+        task=request.task,
+        names=names,
+        kpt_shape=shape,
+        sources=sources,
+        config_path=entry if entry.is_file() else None,
+        config_data=data,
+    )
 
 
 def label_path(image: Path) -> Path:

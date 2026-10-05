@@ -32,6 +32,7 @@ class Box(BaseModel):
 
 
 class AnnotationBase(BaseModel):
+    uid: str = ""
     class_id: int
     line: int
     raw: str
@@ -64,6 +65,7 @@ Annotation = Annotated[Detection | Segment | OrientedBox | Pose, Field(discrimin
 class Issue(BaseModel):
     file: str
     line: int | None = None
+    raw: str | None = None
     message: str
 
 
@@ -75,6 +77,9 @@ class Labels(BaseModel):
 
 class SampleInfo(BaseModel):
     id: int
+    key: str = ""
+    modified: bool = False
+    deleted: bool = False
     path: str
     split: str
     state: LabelState
@@ -84,6 +89,7 @@ class SampleInfo(BaseModel):
 
 
 class SampleDetail(SampleInfo):
+    revision: int = 0
     label_path: str
     width: int | None
     height: int | None
@@ -93,6 +99,7 @@ class SampleDetail(SampleInfo):
 
 
 class SamplePage(BaseModel):
+    revision: int = 0
     items: list[SampleInfo]
     total: int
     offset: int
@@ -107,6 +114,7 @@ class ClassCount(BaseModel):
 
 
 class Stats(BaseModel):
+    revision: int = 0
     images: int
     unique_images: int
     instances: int
@@ -128,3 +136,5 @@ class IndexStatus(BaseModel):
     task: Task
     names: dict[int, str] = Field(default_factory=dict)
     splits: list[str] = Field(default_factory=list)
+    recovery_available: bool = False
+    request: OpenRequest | None = None

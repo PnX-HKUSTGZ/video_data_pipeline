@@ -105,6 +105,6 @@ def read_labels(
         try:
             result.annotations.append(_annotation(raw, line, task, names, kpt_shape))
         except (ValueError, OverflowError) as error:
-            result.issues.append(Issue(file=str(path), line=line, message=str(error)))
+            result.issues.append(Issue(file=str(path), line=line, raw=raw, message=str(error)))
     result.state = "invalid" if result.issues else "valid" if result.annotations else "empty"
     return result

@@ -33,7 +33,7 @@ async function api(path, options = {}) {
 const base = () => `/api/datasets/${state.session}`;
 function filters() {
   const params = new URLSearchParams();
-  for (const [key, id] of [["split", "split-filter"], ["class_id", "class-filter"], ["state", "state-filter"], ["search", "search"]]) {
+  for (const [key, id] of [["split", "split-filter"], ["class_id", "class-filter"], ["state", "state-filter"], ["edit_state", "edit-filter"], ["search", "search"]]) {
     const value = $(id).value.trim();
     if (value) params.set(key, value);
   }
@@ -55,21 +55,34 @@ function resetGallery() {
   $("class-stats").replaceChildren(); $("split-stats").replaceChildren();
 }
 
-async function openDataset(request) {
+async function openDataset(request, force = false) {
+  if (!(await editorBeforeNavigation())) return;
+  editorReset();
   const version = ++state.openVersion;
   ++state.viewVersion; ++state.detailVersion;
   if ($("image-dialog").open) $("image-dialog").close();
   view.image = null; state.detail = null; state.session = null;
   state.request = {...request};
+  $("dataset-path").value = request.path; $("task").value = request.task;
+  $("root-path").value = request.root || "";
+  $("task").dispatchEvent(new Event("change"));
   notice(); resetGallery(); enableFilters(false);
   $("rescan").disabled = true;
   $("candidates").hidden = true; $("index-progress").hidden = false;
   $("index-progress").removeAttribute("value");
   $("status-text").textContent = "正在打开…"; $("footer-state").textContent = "建立索引中";
   try {
-    let result = await api("/api/datasets", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(request)});
+    let result = null;
+    if (!force) {
+      try {
+        const previous = JSON.parse(localStorage.getItem("yolo-viewer-session") || "null");
+        if (previous && JSON.stringify(previous.request) === JSON.stringify(request)) result = await api(`/api/datasets/${previous.id}`);
+      } catch { /* A stopped server or replaced session is reopened below. */ }
+    }
+    if (!result) result = await api("/api/datasets", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(request)});
     if (version !== state.openVersion) return;
     state.session = result.id;
+    localStorage.setItem("yolo-viewer-session", JSON.stringify({id: result.id, request}));
     while (result.state === "indexing") {
       $("status-text").textContent = `${result.phase} · ${result.scanned}${result.total ? ` / ${result.total}` : ""}`;
       if (result.total) { $("index-progress").max = result.total; $("index-progress").value = result.scanned; }
@@ -80,6 +93,7 @@ async function openDataset(request) {
     }
     $("index-progress").hidden = true;
     if (result.state === "error") {
+      if (result.recovery_available) await editorRecoveryAvailable();
       if (result.candidates.length) {
         $("yaml-choice").replaceChildren(...result.candidates.map((path) => new Option(path, path)));
         $("candidates").hidden = false;
@@ -96,6 +110,7 @@ async function openDataset(request) {
     $("task-badge").textContent = tasks[result.task]; $("task-badge").hidden = false;
     $("rescan").disabled = false; enableFilters(true);
     notice(result.warnings.join("\n"));
+    await editorOpened(result);
     await refresh();
   } catch (error) {
     if (version !== state.openVersion) return;
@@ -134,10 +149,21 @@ function renderStats(stats) {
 async function refresh() {
   if (!state.session) return;
   const version = ++state.viewVersion, endpoint = base();
-  const query = filters(), pageQuery = new URLSearchParams(query);
-  pageQuery.set("offset", state.offset); pageQuery.set("limit", state.limit);
   try {
-    const [page, stats] = await Promise.all([api(`${endpoint}/samples?${pageQuery}`), api(`${endpoint}/stats?${query}`)]);
+    let page, stats, consistent = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const query = filters(), pageQuery = new URLSearchParams(query);
+      pageQuery.set("offset", state.offset); pageQuery.set("limit", state.limit);
+      const replies = await Promise.all([api(`${endpoint}/samples?${pageQuery}`), api(`${endpoint}/stats?${query}`), editor.enabled ? api(`${endpoint}/draft`) : Promise.resolve(null)]);
+      if (version !== state.viewVersion) return;
+      [page, stats] = replies;
+      const draft = replies[2];
+      if (page.revision !== stats.revision || draft && draft.revision !== page.revision) continue;
+      if (draft) { editor.draft = draft; editorRenderStatus(); }
+      if (query.toString() !== filters().toString()) continue;
+      consistent = true; break;
+    }
+    if (!consistent) throw new Error("草稿正在被另一页面连续修改，请稍后刷新。");
     if (version !== state.viewVersion) return;
     state.items = page.items; state.total = page.total;
     $("gallery").replaceChildren(...page.items.map((sample, index) => {
@@ -147,6 +173,7 @@ async function refresh() {
       img.loading = "lazy"; img.decoding = "async"; img.alt = sample.path;
       img.src = `${endpoint}/samples/${sample.id}/image?thumbnail=true`;
       img.addEventListener("error", () => { img.hidden = true; wrap.append(element("span", "issue", "图片无法读取")); });
+      if (sample.modified || sample.deleted) wrap.append(element("span", "edit-tag", sample.deleted ? "已删除" : "已修改"));
       wrap.append(img, element("span", "thumb-tag", sample.state === "valid" ? `${sample.instances} 个目标` : labels[sample.state]));
       const meta = element("div", "card-meta"); meta.append(element("span", "card-name", sample.path.split("/").pop()));
       const subtitle = element("div", "card-subtitle"); subtitle.append(element("span", "", sample.split), element("span", "", `#${sample.id + 1}`));
@@ -167,6 +194,7 @@ async function refresh() {
 }
 
 async function showAt(position) {
+  if (!(await editorBeforeNavigation())) return;
   if (position < 0 || position >= state.total) return;
   const version = ++state.detailVersion, endpoint = base();
   state.position = position; state.detail = null; view.image = null; view.selected = -1;
@@ -185,9 +213,19 @@ async function showAt(position) {
       sample = (await api(`${endpoint}/samples?${query}`)).items[0];
     }
     if (version !== state.detailVersion) return;
-    const detail = await api(`${endpoint}/samples/${sample.id}`);
+    const detail = await editorFetchDetail(endpoint, sample.id);
     if (version !== state.detailVersion) return;
     state.detail = detail;
+    renderDetail(detail);
+    if (detail.image_error) { message(detail.image_error); return; }
+    const img = new Image();
+    img.onload = () => { if (version !== state.detailVersion) return; view.image = img; message(""); fit(); };
+    img.onerror = () => { if (version === state.detailVersion) message("图片无法解码，源文件可能已被移除或损坏"); };
+    img.src = `${endpoint}/samples/${sample.id}/image`;
+  } catch (error) { if (version === state.detailVersion) message(error.message); }
+}
+
+function renderDetail(detail) {
     $("detail-title").textContent = detail.path;
     $("detail-meta").textContent = `${detail.split} · ${detail.width ?? "?"} × ${detail.height ?? "?"} px\n${labels[detail.state]}\n${detail.label_path}`;
     $("annotation-count").textContent = detail.annotations.length;
@@ -198,13 +236,8 @@ async function showAt(position) {
       row.addEventListener("click", () => selectAnnotation(index)); return row;
     }));
     if (!detail.annotations.length) $("annotation-list").append(element("p", "muted", "此图片没有有效标注"));
-    $("detail-issues").replaceChildren(...detail.issues.map((issue) => element("div", "issue", `${issue.file}${issue.line ? `:${issue.line}` : ""}\n${issue.message}`)));
-    if (detail.image_error) { message(detail.image_error); return; }
-    const img = new Image();
-    img.onload = () => { if (version !== state.detailVersion) return; view.image = img; message(""); fit(); };
-    img.onerror = () => { if (version === state.detailVersion) message("图片无法解码，源文件可能已被移除或损坏"); };
-    img.src = `${endpoint}/samples/${sample.id}/image`;
-  } catch (error) { if (version === state.detailVersion) message(error.message); }
+    $("detail-issues").replaceChildren(...detail.issues.map((issue) => element("div", "issue", `${issue.file}${issue.line ? `:${issue.line}` : ""}\n${issue.message}${issue.raw !== null && issue.raw !== undefined ? `\n原始行：${issue.raw}` : ""}`)));
+    editorDetail(detail);
 }
 
 function fit() {
@@ -254,6 +287,7 @@ function draw() {
       if ($("show-names").checked) drawText(state.names[annotation.class_id] || `class_${annotation.class_id}`, points[0][0], Math.max(0, points[0][1] - 20 / view.scale), tint);
     });
   }
+  editorDraw(ctx, width, height);
   ctx.restore(); $("zoom-level").textContent = `${Math.round(view.scale * 100)}%`;
 }
 function drawText(text, x, y, tint) {
@@ -280,31 +314,14 @@ function selectAnnotation(index) {
     const {raw, line, ...coordinates} = annotation;
     $("annotation-coordinates").textContent = JSON.stringify(coordinates, null, 2);
   }
+  editorSelection();
   draw();
 }
 
-let pointer = null;
-canvas.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0) return;
-  pointer = {x: event.offsetX, y: event.offsetY, startX: event.offsetX, startY: event.offsetY, moved: false};
-  canvas.setPointerCapture(event.pointerId);
-});
-canvas.addEventListener("pointermove", (event) => {
-  if (!pointer) return;
-  view.x += event.offsetX - pointer.x; view.y += event.offsetY - pointer.y;
-  pointer.moved ||= Math.hypot(event.offsetX - pointer.startX, event.offsetY - pointer.startY) > 4;
-  pointer.x = event.offsetX; pointer.y = event.offsetY; draw();
-});
-canvas.addEventListener("pointerup", (event) => {
-  if (pointer && !pointer.moved && view.image && state.detail && $("show-annotations").checked) {
-    const x = (event.offsetX - view.x) / view.scale, y = (event.offsetY - view.y) / view.scale;
-    let selected = -1;
-    state.detail.annotations.forEach((a, i) => { if (inside(x, y, shape(a, view.image.width, view.image.height))) selected = i; });
-    selectAnnotation(selected);
-  }
-  pointer = null;
-});
-canvas.addEventListener("pointercancel", () => { pointer = null; });
+canvas.addEventListener("pointerdown", (event) => editorPointerDown(event));
+canvas.addEventListener("pointermove", (event) => editorPointerMove(event));
+canvas.addEventListener("pointerup", (event) => editorPointerUp(event));
+canvas.addEventListener("pointercancel", (event) => editorPointerCancel(event));
 canvas.addEventListener("wheel", (event) => { event.preventDefault(); zoom(Math.exp(-event.deltaY * .001), event.offsetX, event.offsetY); }, {passive: false});
 new ResizeObserver(() => {
   const rect = $("canvas-stage").getBoundingClientRect();
@@ -326,16 +343,17 @@ $("task").addEventListener("change", () => {
   $("task-hint").textContent = {detect: "矩形框与类别标签", segment: "闭合多边形与半透明填充", obb: "四点旋转框；与四点分割格式相同，需正确选择", pose: "关键点与可见性；从 YAML 读取 kpt_shape"}[$("task").value];
 });
 $("choose-yaml").addEventListener("click", () => { $("dataset-path").value = $("yaml-choice").value; $("open-form").requestSubmit(); });
-$("rescan").addEventListener("click", () => { if (state.request) openDataset(state.request); });
-for (const id of ["split-filter", "class-filter", "state-filter"]) $(id).addEventListener("change", () => { state.offset = 0; refresh(); });
+$("rescan").addEventListener("click", () => { if (state.request) openDataset(state.request, true); });
+for (const id of ["split-filter", "class-filter", "state-filter", "edit-filter"]) $(id).addEventListener("change", () => { state.offset = 0; refresh(); });
 let searchTimer;
 $("search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.offset = 0; refresh(); }, 200); });
 $("page-prev").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.limit); refresh(); });
 $("page-next").addEventListener("click", () => { state.offset += state.limit; refresh(); });
-$("close-detail").addEventListener("click", () => $("image-dialog").close());
-$("image-dialog").addEventListener("close", () => { ++state.detailVersion; view.image = null; state.detail = null; pointer = null; });
+$("close-detail").addEventListener("click", async () => { if (await editorBeforeNavigation()) $("image-dialog").close(); });
+$("image-dialog").addEventListener("cancel", (event) => { event.preventDefault(); $("close-detail").click(); });
+$("image-dialog").addEventListener("close", () => { editorPointerCancel(); ++state.detailVersion; view.image = null; state.detail = null; });
 $("image-prev").addEventListener("click", () => showAt(state.position - 1).catch(report));
-$("image-next").addEventListener("click", () => showAt(state.position + 1).catch(report));
+$("image-next").addEventListener("click", () => showAt(state.position + (state.detail?.deleted && $("edit-filter").value !== "deleted" ? 0 : 1)).catch(report));
 $("fit-image").addEventListener("click", fit);
 $("zoom-in").addEventListener("click", () => zoom(1.25));
 $("zoom-out").addEventListener("click", () => zoom(.8));

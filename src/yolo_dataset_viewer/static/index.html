@@ -7,11 +7,12 @@
   <title>YOLO · 数据集浏览器</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
+  <script src="/editor.js" defer></script>
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/" aria-label="数据集浏览器首页"><span class="brand-mark">Y</span><b>YOLO</b><span class="divider"></span><span>数据集浏览器</span></a>
-    <span class="readonly"><span class="dot"></span>只读工作空间</span>
+    <span class="readonly"><span class="dot"></span>源数据与草稿分离</span>
   </header>
   <div class="workspace">
     <aside class="sidebar">
@@ -41,11 +42,16 @@
       <div id="candidates" hidden><label for="yaml-choice">选择数据集配置</label><select id="yaml-choice"></select><button id="choose-yaml" class="secondary">使用此配置</button></div>
       <div id="load-status" role="status" aria-live="polite"><span class="status-icon">○</span><span id="status-text">等待打开数据集</span></div>
       <progress id="index-progress" hidden aria-label="索引进度"></progress>
-      <div class="sidebar-bottom"><span class="tiny-badge">4 种标注格式</span><p>检测框 / 分割多边形<br>旋转框 / 姿态关键点</p><p class="muted">浏览操作不会修改源数据。</p></div>
+      <div class="sidebar-bottom"><span class="tiny-badge">4 种标注格式</span><p>检测框 / 分割多边形<br>旋转框 / 姿态关键点</p><p class="muted">浏览不写入；编辑自动保存草稿。</p></div>
     </aside>
     <main>
       <div class="page-heading"><div><div class="section-kicker">DATASET EXPLORER</div><h1>看清每一份标注<span class="accent">.</span></h1><p id="dataset-caption" class="muted">打开数据集，浏览图像、检查标注与类别分布。</p></div><span id="task-badge" class="task-badge" hidden></span></div>
       <div id="notice" class="notice" role="alert" hidden></div>
+      <section id="draft-bar" class="draft-bar" hidden aria-label="草稿操作">
+        <div><strong>差分草稿</strong><span id="draft-summary"></span><small id="save-status" role="status">已保存</small></div>
+        <div class="button-row"><button id="manage-classes" class="secondary">类别与关键点</button><button id="draft-undo" class="secondary">撤销</button><button id="draft-redo" class="secondary">重做</button><button id="draft-discard" class="subtle">放弃草稿</button><button id="export-open" class="primary">导出 / 应用</button><button id="save-retry" class="secondary" hidden>重试保存</button><button id="draft-reload" class="secondary" hidden>读取最新草稿</button></div>
+        <div id="draft-error" class="issue" hidden role="alert"></div>
+      </section>
       <section class="metrics" aria-label="筛选结果统计">
         <div class="metric"><span>图片条目</span><strong id="metric-images">—</strong><small id="unique-images">按划分统计</small></div>
         <div class="metric"><span>有效目标</span><strong id="metric-instances">—</strong><small>来自标准标签</small></div>
@@ -54,7 +60,7 @@
       </section>
       <section class="browser-panel">
         <div class="filterbar">
-          <div class="filter-selects"><select id="split-filter" aria-label="划分筛选" disabled><option value="">全部划分</option></select><select id="class-filter" aria-label="类别筛选" disabled><option value="">全部类别</option></select><select id="state-filter" aria-label="标签状态筛选" disabled><option value="">全部状态</option><option value="valid">有效标签</option><option value="empty">空标签</option><option value="missing">缺失标签</option><option value="invalid">异常标签</option></select></div>
+          <div class="filter-selects"><select id="split-filter" aria-label="划分筛选" disabled><option value="">全部划分</option></select><select id="class-filter" aria-label="类别筛选" disabled><option value="">全部类别</option></select><select id="state-filter" aria-label="标签状态筛选" disabled><option value="">全部状态</option><option value="valid">有效标签</option><option value="empty">空标签</option><option value="missing">缺失标签</option><option value="invalid">异常标签</option></select><select id="edit-filter" aria-label="修改状态筛选" hidden><option value="">全部未删除图片</option><option value="modified">已修改</option><option value="deleted">已删除</option></select></div>
           <input id="search" type="search" placeholder="搜索文件名或相对路径…" aria-label="搜索文件名" disabled>
         </div>
         <div class="content-columns">
@@ -74,11 +80,28 @@
     <div class="detail-header"><div class="detail-heading"><span class="section-kicker">IMAGE INSPECTOR</span><h2 id="detail-title">图片</h2></div><span id="detail-position" class="muted"></span><button id="close-detail" class="icon-button" aria-label="关闭图片">✕</button></div>
     <div class="detail-body">
       <div class="image-workspace"><div class="image-toolbar"><button id="image-prev" class="secondary" aria-label="上一张图片">←</button><button id="image-next" class="secondary" aria-label="下一张图片">→</button><span class="toolbar-divider"></span><button id="zoom-out" class="secondary" aria-label="缩小">−</button><span id="zoom-level">100%</span><button id="zoom-in" class="secondary" aria-label="放大">+</button><button id="fit-image" class="secondary">适应窗口</button><label><input id="show-annotations" type="checkbox" checked> 标注</label><label><input id="show-names" type="checkbox" checked> 文字</label></div>
+        <div id="edit-toolbar" class="image-toolbar edit-toolbar" hidden>
+          <button data-tool="browse" class="secondary active">浏览</button><button data-tool="edit" class="secondary">选择 / 改框</button><button data-tool="draw" class="secondary">新增目标</button><button data-tool="points" class="secondary">关键点</button><select id="new-object-class" aria-label="新目标类别"></select><button id="image-delete" class="subtle danger">删除图片</button><span id="detail-save-status" role="status"></span>
+        </div>
         <div id="canvas-stage"><canvas id="image-canvas" aria-label="图片与标注，拖动平移、滚轮缩放"></canvas><div id="image-message" role="status"></div></div>
         <div class="image-help">滚轮缩放 · 拖动平移 · 点击目标查看标签 · ← → 切换图片</div>
       </div>
-      <aside class="detail-sidebar"><div id="detail-meta" class="muted"></div><h3>标注目标 <span id="annotation-count" class="tiny-badge">0</span></h3><div id="annotation-list"></div><div id="selected-annotation" hidden><h3>原始标签与坐标</h3><pre id="raw-label"></pre><pre id="annotation-coordinates"></pre></div><div id="detail-issues" class="issue-list"></div></aside>
+      <aside class="detail-sidebar"><div id="editor-error" class="issue" hidden role="alert"></div><div class="button-row pending-actions" hidden><button class="secondary retry-pending">重试保存</button><button class="secondary reload-pending">读取最新草稿</button></div><div id="detail-meta" class="muted"></div><h3>标注目标 <span id="annotation-count" class="tiny-badge">0</span></h3><div id="annotation-list"></div><div id="selected-annotation" hidden><h3>原始标签与坐标</h3><pre id="raw-label"></pre><pre id="annotation-coordinates"></pre></div><form id="object-editor" hidden>
+          <h3>编辑目标 <span class="optional">归一化坐标 0–1</span></h3>
+          <label for="object-class">类别</label><select id="object-class"></select>
+          <div class="box-fields"><label>中心 X<input id="box-cx" type="number" step="any" min="0" max="1" required></label><label>中心 Y<input id="box-cy" type="number" step="any" min="0" max="1" required></label><label>宽度<input id="box-width" type="number" step="any" min="0.00000001" max="1" required></label><label>高度<input id="box-height" type="number" step="any" min="0.00000001" max="1" required></label></div>
+          <div class="button-row"><button id="object-save" type="submit" class="secondary">保存坐标</button><button id="object-delete" type="button" class="subtle danger">删除目标</button></div>
+          <div id="point-editor"></div>
+        </form><div id="detail-issues" class="issue-list"></div></aside>
     </div>
+  </dialog>
+  <dialog id="classes-dialog" class="settings-dialog">
+    <div class="detail-header"><h2>类别与关键点</h2><button id="close-classes" class="icon-button" aria-label="关闭类别管理">✕</button></div>
+    <div class="settings-body"><p class="muted">每次确认自动存入草稿。重命名或重排关键点保留已有坐标；新增点尚未标注。</p><div id="classes-error" class="issue" hidden></div><div class="button-row pending-actions" hidden><button class="secondary retry-pending">重试保存</button><button class="secondary reload-pending">读取最新草稿</button></div><form id="class-add-form" class="button-row"><input id="class-add-name" placeholder="新类别名称" aria-label="新类别名称" required><button class="primary" type="submit">新增类别</button></form><div id="class-manager"></div></div>
+  </dialog>
+  <dialog id="export-dialog" class="settings-dialog">
+    <div class="detail-header"><h2>导出与应用草稿</h2><button id="close-export" class="icon-button" aria-label="关闭导出">✕</button></div>
+    <div class="settings-body"><form id="export-form"><label for="export-mode">导出方式</label><select id="export-mode"><option value="new">导出为新数据集</option><option value="inplace">应用回原数据集（先备份）</option></select><label for="export-destination">新数据集目录</label><input id="export-destination" placeholder="/data/datasets/edited" spellcheck="false"><p id="export-help" class="field-hint">原数据集与草稿继续保留。输出路径不能位于源数据集内。</p><button class="secondary" type="submit" id="export-preview-button">检查并预览</button></form><div id="export-error" class="issue" hidden></div><div id="export-preview" hidden></div><button id="export-start" class="primary" hidden>确认导出</button><div id="export-status" role="status" aria-live="polite"></div><button id="export-view-result" class="secondary" hidden>打开导出结果</button></div>
   </dialog>
 </body>
 </html>

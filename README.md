@@ -104,9 +104,25 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
 ## 开发检查
 
 ```bash
+uv run --locked mypy src/video_dataset_pipeline
 uv run --locked pytest -q
 uv run --locked ruff check src tests
 uv run --locked ruff format --check src tests
 ```
 
-测试覆盖时间戳采样、边界间隔、坐标裁剪/归一化、直接指定权重与 YAML、下载失败清理、中文视频路径、非空输出目录保护、失败状态、空数据集和不完整解码。
+测试覆盖时间戳采样、边界间隔、坐标裁剪/归一化、直接指定权重与 YAML、下载失败清理、中文视频路径、非空输出目录保护、失败状态、空数据集和不完整解码，以及记录序列化兼容性、错误记录行号、导出时保留原推理记录。
+
+核心数据流使用 `records.py` 中的 `RawDetection`、`Detection`、`RejectedDetection` 和 `FrameRecord`。检测对象不可变，框为四元素元组；帧记录保存处理状态及产物路径。读取记录后通过 `record.timestamp`、`record.detections` 等属性访问，导出通过 `dataclasses.replace` 复制帧记录。图像仍是 uint8 BGR 数组，采样器仍返回 `(帧号, 时间戳, 图像)`。
+
+`metadata.py` 使用 `TypedDict` 描述视频、划分、运行状态和报告，运行时仍是普通字典。`FrameRecord.to_dict/from_dict` 仅用于 JSON/JSONL 边界转换，保留 schema 4 的字段、坐标数组和可选字段省略规则，已有数据集无需迁移。
+
+mypy 对整个核心包启用严格检查并禁止显式 `Any`，开发依赖由 uv 锁定。JSON/YAML 和第三方返回值在读取处进行类型收窄；唯一的局部导入忽略用于尚未提供 `py.typed` 标记的 `torchvision.ops`。PyTorch/Ultralytics 继续在设备配置后延迟导入。
+
+2026-10-05 类型重构回归：48 个测试及上述开发检查通过。使用当前配置、GPU4 对整段视频重新生成：
+
+```bash
+uv run --locked video-dataset run --config configs/rm26_exchange.yaml \
+  --output datasets/generated/rm26_exchange/recvlnoyv3arV6_typed_test
+```
+
+结果为 1320 帧采样、450 帧通过阈值、19 帧因分界间隔排除，最终训练集 351 张、验证集 80 张，包含 676 个目标框和 36 张预览。与 `recvlnoyv3arV6_nohash_test` 相比，两份逐帧清单各 1320 条记录的全部字段一致，431 份标签内容逐字节一致；两套数据均通过 Ultralytics 加载。对比结果保存在新输出目录的 `comparison.json`。再次运行上述命令时需换用新的输出目录。

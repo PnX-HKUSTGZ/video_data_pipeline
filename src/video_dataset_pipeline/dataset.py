@@ -10,7 +10,7 @@ import numpy as np
 import yaml
 
 from .detection import label_text, split_selected_frames
-from .util import atomic_bytes, read_json, sha256, write_json
+from .util import atomic_bytes, read_json, write_json
 
 
 def read_records(path):
@@ -71,8 +71,6 @@ def export_records(root, inference, train_fraction, gap):
             record.update(
                 image=str(image_path),
                 label=str(label_path),
-                image_sha256=source["candidate_image_sha256"],
-                label_sha256=sha256(root / label_path),
             )
         records.append(record)
     atomic_bytes(
@@ -86,8 +84,8 @@ def check_record_files(root, record):
     for key in ("image", "label", "preview", "candidate_image"):
         if key in record:
             path = root / record[key]
-            if not path.is_file() or sha256(path) != record[f"{key}_sha256"]:
-                raise ValueError(f"Missing or modified committed artifact: {path}")
+            if not path.is_file():
+                raise ValueError(f"Missing artifact: {path}")
 
 
 class Previews:
@@ -145,7 +143,6 @@ class Previews:
         self.counts.update(reasons)
         return {
             "preview": str(path),
-            "preview_sha256": sha256(self.root / path),
             "preview_reasons": reasons,
         }
 
@@ -198,13 +195,9 @@ def validate_dataset(root, ultralytics_check=True):
     root = Path(root).resolve()
     run = read_json(root / "run.json")
     config = run["config"]
-    if run.get("inference_sha256") != sha256(root / "inference.jsonl"):
-        raise ValueError("Inference manifest hash mismatch")
     records = read_records(root / "frames.jsonl")
-    if run.get("candidate_frames") != len(records) or run.get("manifest_sha256") != sha256(
-        root / "frames.jsonl"
-    ):
-        raise ValueError("Manifest count or hash differs from completed decode record")
+    if run.get("candidate_frames") != len(records):
+        raise ValueError("Frame count differs from completed decode record")
     names = {int(k): v for k, v in run["names"].items()}
     data = yaml.safe_load((root / "data.yaml").read_text())
     if data["names"] != names or data["train"] != "images/train" or data["val"] != "images/val":
@@ -214,7 +207,6 @@ def validate_dataset(root, ultralytics_check=True):
     if not run.get("decode", {}).get("decode_complete"):
         raise ValueError("Video decode did not complete")
     expected_files = set()
-    seen_content = {"train": set(), "val": set()}
     previous = -1
     assignments, split_info = split_selected_frames(
         records, config["train_fraction"], config["split_gap_seconds"]
@@ -263,7 +255,6 @@ def validate_dataset(root, ultralytics_check=True):
                 raise ValueError(f"Invalid normalized box: {line}")
             if min(x - w / 2, y - h / 2) < -1e-8 or max(x + w / 2, y + h / 2) > 1 + 1e-8:
                 raise ValueError("YOLO box lies outside image")
-        seen_content[record["split"]].add(record["image_sha256"])
     actual_files = {
         str(p.relative_to(root))
         for folder in ("images", "labels")
@@ -272,9 +263,6 @@ def validate_dataset(root, ultralytics_check=True):
     }
     if actual_files != expected_files:
         raise ValueError(f"Dataset artifact set mismatch: {actual_files ^ expected_files}")
-    overlap = seen_content["train"] & seen_content["val"]
-    if overlap:
-        raise ValueError(f"Identical image content crosses train/val: {len(overlap)} hashes")
     summary = summarize(records, names)
     if min(summary["splits"].values()) == 0:
         raise ValueError(f"Dataset requires positive samples in both splits: {summary['splits']}")

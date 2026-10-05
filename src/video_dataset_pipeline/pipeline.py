@@ -20,7 +20,7 @@ from .dataset import (
 from .detection import filter_detections
 from .device import configure_device, gpu_snapshot
 from .model import Detector, load_model_names
-from .util import atomic_bytes, sha256, write_json
+from .util import atomic_bytes, write_json
 from .video import VideoFrames, probe_video
 
 LOG = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ def _infer(config, root, run, names, frames, records):
         if detector.names != names:
             raise ValueError("Loaded detector changed the class mapping")
         previews = Previews(root, names, config.start, frames.end, bool(config.smoke_frames))
-        prefix = f"{Path(config.input).stem.split('_')[0]}_{run['video_sha256'][:10]}"
+        prefix = Path(config.input).stem
         first = True
         with (root / "inference.jsonl").open("w", encoding="utf-8") as manifest:
             for index, timestamp, image in frames:
@@ -60,9 +60,7 @@ def _infer(config, root, run, names, frames, records):
                 if detections:
                     path = Path(".staging") / f"{name}.jpg"
                     save_jpeg(root / path, image, config.jpeg_quality)
-                    record.update(
-                        candidate_image=str(path), candidate_image_sha256=sha256(root / path)
-                    )
+                    record["candidate_image"] = str(path)
                 record.update(previews.save(name, image, record))
                 append_record(manifest, record)
                 records.append(record)
@@ -81,7 +79,6 @@ def _infer(config, root, run, names, frames, records):
                     gpu_snapshot(root, "execution")
         run.update(
             decode=frames.stats,
-            inference_sha256=sha256(root / "inference.jsonl"),
             candidate_frames=len(records),
             status="exporting",
         )
@@ -103,10 +100,9 @@ def run_pipeline(config):
     run_id = uuid4().hex
     records = []
     run = {
-        "schema_version": 3,
+        "schema_version": 4,
         "run_id": run_id,
         "config": config.to_dict(),
-        "video_sha256": sha256(config.input),
         "video": info,
         "end": frames.end,
         "names": names,
@@ -142,7 +138,6 @@ def run_pipeline(config):
         run.update(
             status="validating",
             split=split_info,
-            manifest_sha256=sha256(root / "frames.jsonl"),
             elapsed_seconds_this_attempt=time.monotonic() - started,
         )
         write_json(run_path, run)
@@ -172,7 +167,6 @@ def run_pipeline(config):
                 {
                     "run_id": run_id,
                     "validation": validation,
-                    "manifest_sha256": run["manifest_sha256"],
                 },
             )
         write_json(run_path, run)

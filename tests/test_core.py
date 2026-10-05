@@ -155,7 +155,7 @@ def test_pipeline_uses_configured_model_files_and_protects_existing_output(synth
     assert (root / "frames.jsonl").read_bytes() == original
     positive = next(r for r in read_records(root / "frames.jsonl") if r["status"] == "included")
     (root / positive["label"]).write_text("0 0.5 0.5 1 1 0.9\n")
-    with pytest.raises(ValueError, match="modified"):
+    with pytest.raises(ValueError, match="Label does not match"):
         validate_dataset(root, False)
 
 

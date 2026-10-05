@@ -73,7 +73,7 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
   config.yaml              # 生效的绝对路径与参数
   run.json                 # 视频信息、模型和 YAML 路径、类别、解码状态
   inference.jsonl          # 全视频逐帧推理提交记录
-  frames.jsonl             # 筛选划分后的时间、框、置信度、文件哈希
+  frames.jsonl             # 筛选划分后的时间、框、置信度、文件路径
   report.json              # 数量、类别、置信度统计
   validation.json          # 完整性与真实 Ultralytics 数据加载结果
   previews/index.html      # 全部抽检预览
@@ -81,6 +81,8 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
   gpu_*.txt                # 物理 UUID、PID、显存与完整进程表
   COMPLETE.json            # 只有完整数据集校验通过后才存在
 ```
+
+图片与标签以“视频文件名_f帧号”命名，例如 `recvlnoyv3arV6_红方工程第一视角_f00000000.jpg`。
 
 每个标签严格为 `class_id x_center y_center width height`，坐标以原图宽高归一化到 `[0,1]`。置信度仅保存在元数据，不写入训练标签。默认不收录没有有效检测框的帧，这些帧可能存在漏检，不能直接视为负样本。
 
@@ -94,7 +96,7 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
 - 每次运行都从头执行。输出目录必须为空；已有数据用 `validate` 检查，重新生成时通过 `--output` 指定新目录。
 - 源视频保持原样；中间仅暂存通过阈值的候选图像，导出通过硬链接复用图像字节。成功或失败退出时均清理暂存目录。
 - 原始视频截断、解码失败、没有有效检测或任一划分为空，都会保留诊断并拒绝写 `COMPLETE.json`。
-- `validate` 检查归一化框、配对、原始分辨率、时间顺序、逐帧记录完整性、跨划分重复图片，并实际用 `YOLODataset` 加载两组数据和样本张量。只操作本输出目录，临时的 Ultralytics 标签缓存会清除。
+- `validate` 检查归一化框、配对、原始分辨率、时间顺序、逐帧记录数量、文件集合，并实际用 `YOLODataset` 加载两组数据和样本张量。只操作本输出目录，临时的 Ultralytics 标签缓存会清除。
 - 冒烟结果仅生成 `SMOKE_COMPLETE.json`，不宣称得到完整训练数据集。
 - `pipeline.log` 按 10 MiB 轮转并保留 3 个备份；运行结束清除本任务 `.tmp`，失败保留诊断记录。进程退出释放 GPU 上下文。
 - Git 忽略输入视频、生成数据、模型、环境和缓存；现有视频下载任务不属于本 Pipeline，不会被修改。

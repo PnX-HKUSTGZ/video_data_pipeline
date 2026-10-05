@@ -5,7 +5,7 @@ description = "Reproducible video pseudo-labeling for YOLO detection datasets"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "av>=14,<17",
-  "ultralytics>=8.3,<9",
+  "ultralytics>=8.4.173,<9",
   "torch==2.7.1",
   "torchvision==0.22.1",
   "PyYAML>=6,<7",
@@ -24,6 +24,9 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.12"]
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }

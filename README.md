@@ -61,7 +61,7 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
 
 默认 2 FPS，置信度阈值 0.5，IoU 阈值 0.7，推理尺寸 640，FP32，保存原始分辨率 JPEG（质量 95）。采用 PTS 顺序抽帧，不通过帧号猜测时间；例如 25 FPS 视频中的 0.5 秒采样点会落到 0.52 秒帧。模型负责 letterbox 与原图坐标映射，额外进行类别内 NMS，使 YOLO26 end-to-end 检测头也遵守配置的 IoU 阈值。
 
-`--device` 接受物理 GPU UUID 或 `cpu`。示例配置的 GPU 选择见运行记录；运行前检查实际占用，可以显式覆盖为其他 UUID。CUDA 可见性在导入 PyTorch 前设置，模型只使用逻辑 `cuda:0`；视频在 CPU 解码，不创建显示窗口或 GPU 渲染上下文。程序不会自动换 GPU，也不会在失败时悄悄改成 CPU。
+配置中用 `device: 4` 选择 `nvidia-smi` 显示的 GPU4，也可以写 `device: cpu`。命令行通过 `--device 4` 或 `--device cpu` 覆盖。默认配置使用 GPU4；视频在 CPU 解码，不创建显示窗口或 GPU 渲染上下文。
 
 ## 输出与标注规则
 

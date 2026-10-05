@@ -10,6 +10,6 @@ start: 0.0
 end: null
 train_fraction: 0.8
 split_gap_seconds: 5.0
-device: GPU-8ba6e5a3-9634-eee2-9681-f22387d0e62f
+device: 4
 jpeg_quality: 95
 smoke_frames: 0

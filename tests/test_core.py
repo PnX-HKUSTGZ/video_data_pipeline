@@ -70,7 +70,7 @@ def test_boxes_are_clipped_normalized_and_invalid_predictions_rejected():
         {"confidence": 1.1},
         {"start": 5, "end": 4},
         {"imgsz": 641},
-        {"device": "0"},
+        {"device": -1},
         {"sample_fps": float("nan")},
     ],
 )

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import yaml
 
+from .device import parse_device
+
 
 @dataclass(frozen=True)
 class Config:
@@ -19,7 +21,7 @@ class Config:
     imgsz: int = 640
     train_fraction: float = 0.8
     split_gap_seconds: float = 5.0
-    device: str = "GPU-2d6b9be4-5a54-1137-aad1-64771b415a70"
+    device: int | str = 0
     jpeg_quality: int = 95
     smoke_frames: int = 0
 
@@ -46,8 +48,7 @@ class Config:
             raise ValueError("imgsz must be a positive multiple of 32; JPEG quality is 1..100")
         if self.smoke_frames < 0:
             raise ValueError("smoke_frames must be nonnegative")
-        if self.device != "cpu" and not self.device.startswith("GPU-"):
-            raise ValueError("device must be a physical GPU UUID or 'cpu'")
+        object.__setattr__(self, "device", parse_device(self.device))
 
     def to_dict(self):
         return asdict(self)

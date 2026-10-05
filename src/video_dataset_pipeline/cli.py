@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from .config import load_config
+from .device import parse_device
 from .model import REVISION, download_model
 
 
@@ -18,8 +19,9 @@ def main():
     download.add_argument("--endpoint", help="Optional Hugging Face API endpoint")
     run = subcommands.add_parser("run", help="Sample, label, export and validate")
     run.add_argument("--config", required=True)
-    for field in ("input", "output", "model", "model-yaml", "device"):
+    for field in ("input", "output", "model", "model-yaml"):
         run.add_argument(f"--{field}")
+    run.add_argument("--device", type=parse_device, help="GPU index (e.g. 4) or cpu")
     for field in (
         "sample-fps",
         "start",

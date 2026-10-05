@@ -3,6 +3,7 @@ import shutil
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from uuid import uuid4
 
 import yaml
 
@@ -11,7 +12,6 @@ from .dataset import (
     append_record,
     check_record_files,
     export_records,
-    read_records,
     save_jpeg,
     summarize,
     validate_dataset,
@@ -19,8 +19,8 @@ from .dataset import (
 )
 from .detection import filter_detections
 from .device import configure_device, gpu_snapshot
-from .model import Detector, verify_model
-from .util import atomic_bytes, fingerprint, read_json, sha256, write_json
+from .model import Detector, load_model_names
+from .util import atomic_bytes, sha256, write_json
 from .video import VideoFrames, probe_video
 
 LOG = logging.getLogger(__name__)
@@ -30,25 +30,14 @@ def _infer(config, root, run, names, frames, records):
     device = configure_device(config.device)
     gpu_snapshot(root, "before")
     try:
-        detector = Detector(config.model, config, device)
+        detector = Detector(config, device)
         if detector.names != names:
             raise ValueError("Loaded detector changed the class mapping")
-        previews = Previews(
-            root, names, config.start, frames.end, records, bool(config.smoke_frames)
-        )
-        committed = {record["frame_index"]: record for record in records}
-        seen = set()
+        previews = Previews(root, names, config.start, frames.end, bool(config.smoke_frames))
         prefix = f"{Path(config.input).stem.split('_')[0]}_{run['video_sha256'][:10]}"
         first = True
-        with (root / "inference.jsonl").open("a", encoding="utf-8") as manifest:
+        with (root / "inference.jsonl").open("w", encoding="utf-8") as manifest:
             for index, timestamp, image in frames:
-                if index in committed:
-                    if abs(committed[index]["timestamp"] - timestamp) > 1e-7:
-                        raise ValueError("Resume timestamp differs from committed manifest")
-                    seen.add(index)
-                    continue
-                if committed and index <= max(committed):
-                    raise ValueError("Resume manifest omitted a sampled frame")
                 height, width = image.shape[:2]
                 raw = detector.predict(image)
                 if first:
@@ -90,10 +79,6 @@ def _infer(config, root, run, names, frames, records):
                     )
                 if len(records) % 200 == 0:
                     gpu_snapshot(root, "execution")
-        if seen != set(committed):
-            raise ValueError(
-                "Resume manifest contains frames outside the current sampling schedule"
-            )
         run.update(
             decode=frames.stats,
             inference_sha256=sha256(root / "inference.jsonl"),
@@ -105,71 +90,33 @@ def _infer(config, root, run, names, frames, records):
         gpu_snapshot(root, "shutdown")
 
 
-def run_pipeline(config, resume=False):
+def run_pipeline(config):
     root = Path(config.output)
     root.mkdir(parents=True, exist_ok=True)
-    model_manifest = verify_model(config.model)
+    if any(root.iterdir()):
+        raise ValueError("Output directory must be empty; choose a new --output directory")
+    if not Path(config.model).is_file():
+        raise ValueError(f"Model weights missing: {config.model}")
+    names = load_model_names(config.model_yaml)
     info = probe_video(config.input)
     frames = VideoFrames(config.input, info, config)
-    identity = {
-        "schema_version": 2,
+    run_id = uuid4().hex
+    records = []
+    run = {
+        "schema_version": 3,
+        "run_id": run_id,
         "config": config.to_dict(),
         "video_sha256": sha256(config.input),
-        "model_revision": model_manifest["revision"],
-        "model_files": model_manifest["files"],
+        "video": info,
+        "end": frames.end,
+        "names": names,
+        "model": config.model,
+        "model_yaml": config.model_yaml,
+        "pseudo_labels": True,
+        "status": "inference",
     }
-    run_id = fingerprint(identity)
-    names = yaml.safe_load((Path(config.model) / model_manifest["metadata"]).read_text())["names"]
-    names = {int(k): str(v) for k, v in names.items()}
     run_path = root / "run.json"
-    if run_path.exists():
-        run = read_json(run_path)
-        if run["run_id"] != run_id:
-            raise ValueError(
-                "Input, model or configuration changed; select a fresh output directory"
-            )
-        if not resume:
-            raise ValueError("Output exists; use --resume with the same configuration")
-        if (root / "COMPLETE.json").exists():
-            configure_device("cpu")
-            try:
-                result = validate_dataset(root)
-            except Exception:
-                (root / "COMPLETE.json").unlink(missing_ok=True)
-                raise
-            _cleanup_staging(root)
-            LOG.info("Dataset already complete and revalidated")
-            return result
-        if (root / "SMOKE_COMPLETE.json").exists():
-            for record in read_records(root / "frames.jsonl"):
-                check_record_files(root, record)
-            _cleanup_staging(root)
-            return read_json(root / "report.json")
-        records = read_records(root / "inference.jsonl", repair_tail=True)
-        for record in records:
-            check_record_files(root, record)
-        if run.get("decode", {}).get("decode_complete") and (
-            run.get("inference_sha256") != sha256(root / "inference.jsonl")
-            or len(records) != run["candidate_frames"]
-        ):
-            raise ValueError("Committed inference count/hash mismatch")
-    else:
-        if any(root.iterdir()):
-            raise ValueError("Refusing to mix generated files into a nonempty output directory")
-        records = []
-        run = {
-            "run_id": run_id,
-            **identity,
-            "video": info,
-            "end": frames.end,
-            "names": names,
-            "model": model_manifest,
-            "pseudo_labels": True,
-            "status": "inference",
-        }
-        write_json(run_path, run)
-    for path in root.rglob("*.tmp"):
-        path.unlink()
+    write_json(run_path, run)
     for split in ("train", "val"):
         for directory in ("images", "labels"):
             (root / directory / split).mkdir(parents=True, exist_ok=True)
@@ -188,10 +135,7 @@ def run_pipeline(config, resume=False):
     logging.getLogger().addHandler(handler)
     started = time.monotonic()
     try:
-        if not run.get("decode", {}).get("decode_complete"):
-            _infer(config, root, run, names, frames, records)
-        else:
-            configure_device("cpu")
+        _infer(config, root, run, names, frames, records)
         records, split_info = export_records(
             root, records, config.train_fraction, config.split_gap_seconds
         )
@@ -201,7 +145,6 @@ def run_pipeline(config, resume=False):
             manifest_sha256=sha256(root / "frames.jsonl"),
             elapsed_seconds_this_attempt=time.monotonic() - started,
         )
-        run.pop("error", None)
         write_json(run_path, run)
         report = {
             **summarize(records, names),
@@ -237,7 +180,6 @@ def run_pipeline(config, resume=False):
             root / "progress.json",
             {"run_id": run_id, "samples": len(records), "status": run["status"]},
         )
-        _cleanup_staging(root)
         LOG.info("%s: %s", run["status"], report)
         return report
     except BaseException as error:
@@ -254,9 +196,10 @@ def run_pipeline(config, resume=False):
                 "decode": run["decode"],
             },
         )
-        LOG.exception("Pipeline failed; committed records preserved for --resume")
+        LOG.exception("Pipeline failed; diagnostic records retained")
         raise
     finally:
+        _cleanup_staging(root)
         for path in root.rglob("*.tmp"):
             path.unlink()
         logging.getLogger().removeHandler(handler)
@@ -270,7 +213,7 @@ def _cleanup_staging(root):
             shutil.rmtree(staging)
         except OSError:
             LOG.warning(
-                "Could not clean staging directory; final dataset remains valid: %s",
+                "Could not clean staging directory: %s",
                 staging,
                 exc_info=True,
             )

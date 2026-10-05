@@ -1,4 +1,4 @@
-from dataclasses import replace
+from pathlib import Path
 
 import av
 import numpy as np
@@ -76,17 +76,16 @@ def test_boxes_are_clipped_normalized_and_invalid_predictions_rejected():
 )
 def test_invalid_config(changes):
     with pytest.raises(ValueError):
-        Config(input="a", output="b", **changes)
+        Config(input="a", output="b", model="weights.pt", model_yaml="names.yaml", **changes)
 
 
-def test_manifest_only_repairs_uncommitted_tail(tmp_path):
+def test_frame_records_reject_truncated_data_without_modifying_it(tmp_path):
     path = tmp_path / "frames.jsonl"
-    path.write_bytes(b'{"frame_index": 0}\n{"frame_index":')
-    assert read_records(path, repair_tail=True) == [{"frame_index": 0}]
-    assert path.read_bytes() == b'{"frame_index": 0}\n'
-    path.write_bytes(b'broken\n{"frame_index": 1}\n')
-    with pytest.raises(ValueError):
-        read_records(path, repair_tail=True)
+    content = b'{"frame_index": 0}\n{"frame_index":'
+    path.write_bytes(content)
+    with pytest.raises(ValueError, match="Invalid frame record"):
+        read_records(path)
+    assert path.read_bytes() == content
 
 
 @pytest.fixture
@@ -105,8 +104,7 @@ def synthetic_run(tmp_path, monkeypatch):
     model = tmp_path / "model"
     model.mkdir()
     (model / "metadata.yaml").write_text(yaml.safe_dump({"names": {0: "pillar", 1: "exchange"}}))
-    manifest = {"revision": "synthetic", "files": [], "metadata": "metadata.yaml"}
-    monkeypatch.setattr(pipeline, "verify_model", lambda _: manifest)
+    (model / "custom_weights.pt").write_bytes(b"synthetic weights")
     monkeypatch.setattr(pipeline, "validate_dataset", lambda root: validate_dataset(root, False))
 
     class FakeDetector:
@@ -128,33 +126,33 @@ def synthetic_run(tmp_path, monkeypatch):
     config = Config(
         input=str(video),
         output=str(tmp_path / "out"),
-        model=str(model),
+        model=str(model / "custom_weights.pt"),
+        model_yaml=str(model / "metadata.yaml"),
         device="cpu",
         split_gap_seconds=0.5,
     )
     return config, FakeDetector
 
 
-def test_pipeline_recovers_interrupted_run_without_relabeling_committed_frames(synthetic_run):
+def test_pipeline_uses_configured_model_files_and_protects_existing_output(synthetic_run):
     config, detector = synthetic_run
-    detector.fail_at = 7
-    with pytest.raises(RuntimeError, match="simulated interruption"):
-        pipeline.run_pipeline(config)
-    root = __import__("pathlib").Path(config.output)
-    assert not (root / "COMPLETE.json").exists()
-    assert len(read_records(root / "inference.jsonl")) == 6
-    detector.fail_at = None
-    detector.calls = 0
-    report = pipeline.run_pipeline(config, resume=True)
-    assert detector.calls == 18
+    report = pipeline.run_pipeline(config)
+    root = Path(config.output)
+    assert detector.calls == 24
     assert report["candidate_frames"] == 24
     assert report["no_detection_frames"] > 0
     assert report["split_gap_frames"] == 2
     assert report["splits"]["val"] > 0
     assert (root / "COMPLETE.json").exists()
-    assert read_json(root / "run.json")["decode"]["decoded_frames"] == 120
-    with pytest.raises(ValueError, match="configuration changed"):
-        pipeline.run_pipeline(replace(config, confidence=0.7), resume=True)
+    run = read_json(root / "run.json")
+    assert run["decode"]["decoded_frames"] == 120
+    assert run["model"] == config.model
+    assert run["model_yaml"] == config.model_yaml
+    original = (root / "frames.jsonl").read_bytes()
+    with pytest.raises(ValueError, match="Output directory must be empty"):
+        pipeline.run_pipeline(config)
+    assert detector.calls == 24
+    assert (root / "frames.jsonl").read_bytes() == original
     positive = next(r for r in read_records(root / "frames.jsonl") if r["status"] == "included")
     (root / positive["label"]).write_text("0 0.5 0.5 1 1 0.9\n")
     with pytest.raises(ValueError, match="modified"):
@@ -166,14 +164,12 @@ def test_empty_dataset_is_not_marked_complete(synthetic_run):
     detector.predict = lambda self, image: []
     with pytest.raises(ValueError, match="positive samples"):
         pipeline.run_pipeline(config)
-    from pathlib import Path
-
     root = Path(config.output)
     assert not (root / "COMPLETE.json").exists()
     assert read_json(root / "report.json")["included_frames"] == 0
 
 
-def test_export_interruption_resumes_without_inference(synthetic_run, monkeypatch):
+def test_export_failure_cleans_staging_and_cannot_continue(synthetic_run, monkeypatch):
     config, detector = synthetic_run
     original = pipeline.export_records
 
@@ -184,15 +180,11 @@ def test_export_interruption_resumes_without_inference(synthetic_run, monkeypatc
     monkeypatch.setattr(pipeline, "export_records", crash_after_export)
     with pytest.raises(RuntimeError, match="export interrupted"):
         pipeline.run_pipeline(config)
-    calls = detector.calls
-    monkeypatch.setattr(pipeline, "export_records", original)
-    report = pipeline.run_pipeline(config, resume=True)
-    assert detector.calls == calls
-    assert report["candidate_frames"] == 24
-    from pathlib import Path
-
+    assert detector.calls == 24
     assert not (Path(config.output) / ".staging").exists()
-    assert (Path(config.output) / "COMPLETE.json").exists()
+    assert not (Path(config.output) / "COMPLETE.json").exists()
+    with pytest.raises(ValueError, match="Output directory must be empty"):
+        pipeline.run_pipeline(config)
 
 
 def test_incomplete_decode_is_not_marked_complete(synthetic_run, monkeypatch):
@@ -208,8 +200,6 @@ def test_incomplete_decode_is_not_marked_complete(synthetic_run, monkeypatch):
     monkeypatch.setattr(pipeline.VideoFrames, "__iter__", broken)
     with pytest.raises(ValueError, match="Decode ended early"):
         pipeline.run_pipeline(config)
-    from pathlib import Path
-
     root = Path(config.output)
     assert not (root / "COMPLETE.json").exists()
     assert read_json(root / "run.json")["decode"]["decode_complete"] is False

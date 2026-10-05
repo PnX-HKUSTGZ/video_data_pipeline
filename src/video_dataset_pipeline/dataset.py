@@ -13,12 +13,12 @@ from .detection import label_text, split_selected_frames
 from .util import atomic_bytes, read_json, sha256, write_json
 
 
-def read_records(path, repair_tail=False):
+def read_records(path):
     path = Path(path)
     if not path.exists():
         return []
     data = path.read_bytes()
-    records, offset = [], 0
+    records = []
     lines = data.splitlines(keepends=True)
     for i, line in enumerate(lines):
         try:
@@ -26,13 +26,8 @@ def read_records(path, repair_tail=False):
             if not line.endswith(b"\n"):
                 raise ValueError("Uncommitted trailing record")
         except (ValueError, UnicodeDecodeError):
-            if not repair_tail or i != len(lines) - 1:
-                raise ValueError(f"Invalid manifest record {i + 1}") from None
-            with path.open("r+b") as stream:
-                stream.truncate(offset)
-            break
+            raise ValueError(f"Invalid frame record {i + 1}") from None
         records.append(record)
-        offset += len(line)
     ids = [r["frame_index"] for r in records]
     if ids != sorted(set(ids)):
         raise ValueError("Manifest frame IDs must be unique and ordered")
@@ -70,10 +65,8 @@ def export_records(root, inference, train_fraction, gap):
             name = Path(source["candidate_image"]).stem
             image_path = Path("images") / split / f"{name}.jpg"
             label_path = Path("labels") / split / f"{name}.txt"
-            if not (root / image_path).exists():
-                # Both directories share a filesystem. This avoids duplicating image bytes
-                # and keeps the staged image available until export is committed.
-                os.link(root / source["candidate_image"], root / image_path)
+            # Both directories share a filesystem, so image bytes need not be duplicated.
+            os.link(root / source["candidate_image"], root / image_path)
             atomic_bytes(root / label_path, label_text(record["detections"]).encode())
             record.update(
                 image=str(image_path),
@@ -98,12 +91,10 @@ def check_record_files(root, record):
 
 
 class Previews:
-    def __init__(self, root, names, start, end, records, smoke=False):
+    def __init__(self, root, names, start, end, smoke=False):
         self.root, self.names, self.start, self.end = root, names, start, end
         self.smoke = smoke
-        self.counts = Counter(
-            reason for record in records for reason in record.get("preview_reasons", [])
-        )
+        self.counts = Counter()
 
     def save(self, name, image, record):
         reasons = []

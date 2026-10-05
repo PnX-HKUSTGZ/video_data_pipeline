@@ -1,6 +1,7 @@
 input: datasets/rm26_fps_videos/videos/北部赛区/红方/recvlnoyv3arV6_红方工程第一视角.flv
 output: datasets/generated/rm26_exchange/recvlnoyv3arV6
-model: models/RM26_engineer_exchange_model
+model: models/RM26_engineer_exchange_model/yolo/v10.12/best.pt
+model_yaml: models/RM26_engineer_exchange_model/yolo/v10.12/openvino_best/metadata.yaml
 sample_fps: 2.0
 confidence: 0.5
 iou: 0.7

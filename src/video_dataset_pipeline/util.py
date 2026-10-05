@@ -12,10 +12,6 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def fingerprint(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
-
-
 def atomic_bytes(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -34,12 +34,12 @@
 
 ## 已通过的检查
 
-- 22 项自动测试：抽帧、坐标、类别、阈值、先筛选后划分、下载校验与恢复、推理/导出中断恢复、失败状态等。
+- 25 项自动测试：抽帧、坐标、类别、阈值、先筛选后划分、本地权重/YAML 配置、非空输出保护、下载失败清理和失败状态等。
 - Ruff 检查及格式检查。
 - 最新流程的 20 帧真实冒烟检查：8 张通过阈值，6 张训练、2 张验证；两类均出现。
 - 全视频正常解码；图片与标签哈希、分辨率、五列格式、归一化边界、时间顺序、文件集合与跨划分内容重复检查。
 - Ultralytics `YOLODataset` 实际加载训练集 351 图片/584 框、验证集 80 图片/92 框，并读取样本张量。
-- 完成后 `run --resume` 重新校验成功；无重复推理和数据追加。
+- 已生成的数据集通过独立 `validate` 命令校验；每次新运行要求空输出目录。
 - 暂存目录和 `.tmp` 已清理；`COMPLETE.json`、`validation.json` 均存在。
 
 ## 复现
@@ -47,7 +47,7 @@
 ```bash
 uv sync --locked
 uv run --locked video-dataset download-model
-uv run --locked video-dataset run --config configs/rm26_exchange.yaml --resume
+uv run --locked video-dataset run --config configs/rm26_exchange.yaml --output datasets/generated/rm26_exchange/recvlnoyv3arV6_new
 uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoyv3arV6
 ```
 

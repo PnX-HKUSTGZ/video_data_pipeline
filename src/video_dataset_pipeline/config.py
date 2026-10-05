@@ -9,7 +9,8 @@ import yaml
 class Config:
     input: str
     output: str
-    model: str = "models/RM26_engineer_exchange_model"
+    model: str
+    model_yaml: str
     sample_fps: float = 2.0
     start: float = 0.0
     end: float | None = None
@@ -58,11 +59,16 @@ def load_config(path, overrides=None):
     if unknown := set(data) - allowed:
         raise ValueError(f"Unknown config keys: {sorted(unknown)}")
     data.update({k: v for k, v in (overrides or {}).items() if v is not None})
-    for key in ("input", "output", "model"):
-        data[key] = str(Path(data.get(key, Config.__dataclass_fields__[key].default)).resolve())
+    for key in ("input", "output", "model", "model_yaml"):
+        if not data.get(key):
+            raise ValueError(f"Missing required config field: {key}")
+        data[key] = str(Path(data[key]).resolve())
     config = Config(**data)
     if not Path(config.input).is_file():
         raise ValueError(f"Input video missing: {config.input}")
-    if Path(config.output) in (Path(config.input).parent, Path(config.model)):
+    for key in ("model", "model_yaml"):
+        if not Path(getattr(config, key)).is_file():
+            raise ValueError(f"Configured {key} file missing: {getattr(config, key)}")
+    if Path(config.output) in (Path(config.input).parent, Path(config.model).parent):
         raise ValueError("Output must be separate from source video and model directories")
     return config

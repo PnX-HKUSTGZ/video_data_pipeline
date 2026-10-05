@@ -4,7 +4,7 @@
 
 ## 环境
 
-Linux，Python 3.12，系统需提供 `ffprobe` 和 `curl`；CUDA 推理使用支持 CUDA 12.8 的 NVIDIA 驱动。依赖全部由 uv 管理：
+Linux，Python 3.12，系统需提供 `ffprobe`；可选下载命令使用 `curl`。CUDA 推理使用支持 CUDA 12.8 的 NVIDIA 驱动。依赖全部由 uv 管理：
 
 ```bash
 uv sync --locked
@@ -29,7 +29,14 @@ uv run --locked video-dataset download-model --endpoint https://hf-mirror.com
 - 类别来自权重和发布元数据，必须一致：`0: pillar`、`1: exchange`。
 - 发布的纯检测模型实际为 **YOLO26s**；YOLO11 训练可以读取其生成的数据集。姿态模型和 LiteHR 权重不参与本流程。
 
-只下载检测权重、类别元数据和模型卡。下载通过 curl 的 HTTPS Range 恢复，固定提交 SHA；每次重试重新读取 `.part` 长度，避免丢失下载进度。权重核对远端 LFS SHA-256，文本核对 Git blob，全部核对字节数。成功后生成 `model_manifest.json`。中断可直接重复命令，已有完整模型会先校验再复用。
+这是可选的便捷下载命令，仅下载权重和类别 YAML；已有文件直接复用。下载不加锁，不生成额外的模型清单，也不进行哈希校验。下载失败会清理临时文件，下次从头下载。模型也可以自行准备，启动时只读取配置中的两个本地文件：
+
+```yaml
+model: models/RM26_engineer_exchange_model/yolo/v10.12/best.pt
+model_yaml: models/RM26_engineer_exchange_model/yolo/v10.12/openvino_best/metadata.yaml
+```
+
+`model_yaml` 需要包含 `names` 类别名称，可使用列表或从 0 开始的连续整数映射。运行时确认其类别顺序与权重一致，防止生成错误类别标签；无需模型清单或特定目录结构。
 
 ## 生成
 
@@ -48,9 +55,7 @@ uv run --locked video-dataset run --config configs/rm26_exchange.yaml \
   --sample-fps 5 --start 100 --end 400 \
   --output datasets/generated/rm26_exchange/custom
 
-# 仅相同输入、模型、配置可以恢复；已完成任务会重新校验
-uv run --locked video-dataset run --config configs/rm26_exchange.yaml --resume
-
+# 复核已生成的数据集
 uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoyv3arV6
 ```
 
@@ -66,7 +71,7 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
   labels/{train,val}/*.txt
   data.yaml
   config.yaml              # 生效的绝对路径与参数
-  run.json                 # 视频哈希、模型版本、类别、解码状态
+  run.json                 # 视频信息、模型和 YAML 路径、类别、解码状态
   inference.jsonl          # 全视频逐帧推理提交记录
   frames.jsonl             # 筛选划分后的时间、框、置信度、文件哈希
   report.json              # 数量、类别、置信度统计
@@ -83,15 +88,15 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
 
 预览覆盖 20 个时间桶、每个出现类别、低置信度和无检测样例。模型仍可能误检或漏检；本数据是伪标签，不是人工真值，验证集不能用于宣称模型真实精度。未自动剪裁画面中的赛事 UI 或小窗。
 
-## 恢复、校验与资源
+## 运行、校验与资源
 
 - 推理阶段原子写入候选图片和预览后才提交 `inference.jsonl` 行，逐帧刷盘。
-- 恢复时校验已提交文件的 SHA-256，推理未完成时重新解码并跳过已标注帧；推理已经完成则直接继续导出，无需再运行模型。尾部未完整提交的一行会截断修复。已提交文件被修改或丢失时明确报错。
-- 输入哈希、模型哈希或配置不同必须使用新输出目录。源视频保持原样；中间仅暂存通过阈值的候选图像，导出通过硬链接复用图像字节，成功后清理暂存目录。
+- 每次运行都从头执行。输出目录必须为空；已有数据用 `validate` 检查，重新生成时通过 `--output` 指定新目录。
+- 源视频保持原样；中间仅暂存通过阈值的候选图像，导出通过硬链接复用图像字节。成功或失败退出时均清理暂存目录。
 - 原始视频截断、解码失败、没有有效检测或任一划分为空，都会保留诊断并拒绝写 `COMPLETE.json`。
-- `validate` 检查归一化框、配对、原始分辨率、时间顺序、manifest 完整性、跨划分重复图片，并实际用 `YOLODataset` 加载两组数据和样本张量。只操作本输出目录，临时的 Ultralytics 标签缓存会清除。
+- `validate` 检查归一化框、配对、原始分辨率、时间顺序、逐帧记录完整性、跨划分重复图片，并实际用 `YOLODataset` 加载两组数据和样本张量。只操作本输出目录，临时的 Ultralytics 标签缓存会清除。
 - 冒烟结果仅生成 `SMOKE_COMPLETE.json`，不宣称得到完整训练数据集。
-- `pipeline.log` 按 10 MiB 轮转并保留 3 个备份；运行结束清除本任务 `.tmp`，失败保留可恢复文件。进程退出释放 GPU 上下文。
+- `pipeline.log` 按 10 MiB 轮转并保留 3 个备份；运行结束清除本任务 `.tmp`，失败保留诊断记录。进程退出释放 GPU 上下文。
 - Git 忽略输入视频、生成数据、模型、环境和缓存；现有视频下载任务不属于本 Pipeline，不会被修改。
 
 ## 开发检查
@@ -102,4 +107,4 @@ uv run --locked ruff check src tests
 uv run --locked ruff format --check src tests
 ```
 
-测试覆盖时间戳采样、边界间隔、坐标裁剪/归一化、下载恢复与校验、中文视频路径、异常中断恢复、参数变化拒绝恢复、空数据集和不完整解码。
+测试覆盖时间戳采样、边界间隔、坐标裁剪/归一化、直接指定权重与 YAML、下载失败清理、中文视频路径、非空输出目录保护、失败状态、空数据集和不完整解码。

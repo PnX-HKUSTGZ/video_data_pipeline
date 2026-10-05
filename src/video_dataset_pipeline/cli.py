@@ -18,8 +18,7 @@ def main():
     download.add_argument("--endpoint", help="Optional Hugging Face API endpoint")
     run = subcommands.add_parser("run", help="Sample, label, export and validate")
     run.add_argument("--config", required=True)
-    run.add_argument("--resume", action="store_true")
-    for field in ("input", "output", "model", "device"):
+    for field in ("input", "output", "model", "model-yaml", "device"):
         run.add_argument(f"--{field}")
     for field in (
         "sample-fps",
@@ -49,8 +48,7 @@ def main():
             from .pipeline import run_pipeline
 
             config_path = arguments.pop("config")
-            resume = arguments.pop("resume")
-            result = run_pipeline(load_config(config_path, arguments), resume=resume)
+            result = run_pipeline(load_config(config_path, arguments))
         else:
             from .device import configure_device
 

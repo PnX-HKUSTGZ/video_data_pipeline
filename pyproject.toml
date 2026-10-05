@@ -17,6 +17,13 @@ dependencies = [
 
 [project.scripts]
 video-dataset = "video_dataset_pipeline.cli:main"
+yolo-viewer = "yolo_dataset_viewer.cli:main"
+
+[project.optional-dependencies]
+viewer = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "Pillow>=11,<13"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/video_dataset_pipeline", "src/yolo_dataset_viewer"]
 
 [build-system]
 requires = ["hatchling"]
@@ -28,7 +35,9 @@ dev = [
     "pytest>=8,<10",
     "ruff>=0.12",
     "types-pyyaml>=6.0.12.20260906",
+    "httpx>=0.28,<1",
 ]
+browser = ["playwright>=1.58,<1.59"]
 
 [tool.uv]
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
@@ -49,7 +58,12 @@ testpaths = ["tests"]
 line-length = 100
 
 [tool.mypy]
+plugins = ["pydantic.mypy"]
 python_version = "3.12"
-files = ["src/video_dataset_pipeline"]
+files = ["src/video_dataset_pipeline", "src/yolo_dataset_viewer"]
 strict = true
 disallow_any_explicit = true
+
+[tool.pydantic-mypy]
+init_typed = true
+init_forbid_extra = true

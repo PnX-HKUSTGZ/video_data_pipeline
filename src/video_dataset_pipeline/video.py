@@ -82,13 +82,15 @@ class TimestampSampler:
 
 
 class VideoFrames:
-    """顺序解码视频并按 PTS 抽帧，stats 记录本次迭代的解码进度。"""
+    """顺序解码视频；保存视频时输出全部帧，否则按 PTS 抽帧。"""
 
     def __init__(self, path: str | Path, info: VideoInfo, config: Config) -> None:
-        """将结束时间限制在视频时长内，并拒绝空区间或超过源帧率的抽帧率。"""
+        """检查处理区间；仅在抽帧模式下限制 sample_fps 不得超过源帧率。"""
         self.path, self.info, self.config = Path(path), info, config
         self.end = min(config.end if config.end is not None else info["duration"], info["duration"])
-        if config.start >= self.end or config.sample_fps > info["fps"] + 1e-6:
+        if config.start >= self.end or (
+            not config.save_video and config.sample_fps > info["fps"] + 1e-6
+        ):
             raise ValueError("Empty time interval or sample_fps exceeds the source frame rate")
         self.stats: DecodeStats = {
             "decoded_frames": 0,
@@ -101,9 +103,14 @@ class VideoFrames:
 
         时间原点使用视频流起始 PTS，缺失时使用首帧 PTS。损坏帧、缺失或不递增
         的时间戳以及提前结束都会报错；迭代正常耗尽后才设置 decode_complete。
+        save_video 开启时直接输出区间内的每一帧，不通过采样器，保留变帧率时间戳。
         """
-        sampler = TimestampSampler(
-            self.config.sample_fps, self.config.start, self.end, self.config.smoke_frames
+        sampler = (
+            None
+            if self.config.save_video
+            else TimestampSampler(
+                self.config.sample_fps, self.config.start, self.end, self.config.smoke_frames
+            )
         )
         previous = -float("inf")
         with av.open(str(self.path)) as container:
@@ -130,7 +137,9 @@ class VideoFrames:
                 self.stats.update({"decoded_frames": index + 1, "last_timestamp": timestamp})
                 if timestamp >= self.end - 1e-7:
                     break
-                if sampler.accepts(timestamp):
+                if timestamp < self.config.start - 1e-7:
+                    continue
+                if sampler is None or sampler.accepts(timestamp):
                     yield index, timestamp, cast(BGRImage, frame.to_ndarray(format="bgr24"))
         if previous + 1 / self.info["fps"] < self.end - max(0.1, 2 / self.info["fps"]):
             raise ValueError(f"Decode ended early at {previous:.3f}s; expected {self.end:.3f}s")

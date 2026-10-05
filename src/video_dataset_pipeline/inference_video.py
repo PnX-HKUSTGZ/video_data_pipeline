@@ -1,4 +1,4 @@
-"""将推理采样帧流式编码为可播放的带标注视频，不保留音频。"""
+"""将逐帧推理结果按源时间戳编码为带标注视频，不保留音频。"""
 
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ TIME_BASE = Fraction(1, 90000)
 
 
 class InferenceVideoWriter:
-    """按原始时间间隔保存采样帧；仅在成功关闭编码器后发布 MP4 文件。"""
+    """按原始时间间隔保存每个源帧；仅在成功关闭编码器后发布 MP4 文件。"""
 
     def __init__(self, root: Path, width: int, height: int, fps: float, end: float) -> None:
-        """设置原图尺寸、名义采样率和源视频中的结束秒数，暂不打开输出文件。"""
+        """设置原图尺寸、源帧率和源视频中的结束秒数，暂不打开输出文件。"""
         self.path = root / INFERENCE_VIDEO
         self.temporary = root / f"{INFERENCE_VIDEO}.tmp"
         self.width, self.height, self.fps, self.end = width, height, fps, end
@@ -80,7 +80,7 @@ class InferenceVideoWriter:
         self._pending = frame
 
     def _encode(self, frame: av.VideoFrame) -> None:
-        """写入一帧并设置 packet 时长，保留不等间隔采样和末帧的正确播放时长。"""
+        """写入一帧并设置 packet 时长，保留变帧率输入和末帧的正确播放时长。"""
         assert self._stream is not None and self._container is not None
         # 零延迟、无 B 帧的编码器即时输出当前帧，不会将时长错配给其他帧。
         for packet in self._stream.encode(frame):
@@ -119,7 +119,7 @@ class InferenceVideoWriter:
 def validate_inference_video(root: Path, records: Sequence[FrameRecord], end: float) -> None:
     """流式解码可选视频，核对帧数、尺寸、相对时间戳和结束时长。"""
     if not records:
-        raise ValueError("Inference video requires sampled frames")
+        raise ValueError("Inference video requires frame records")
     count = 0
     with av.open(str(root / INFERENCE_VIDEO)) as container:
         stream = container.streams.video[0]
@@ -128,7 +128,7 @@ def validate_inference_video(root: Path, records: Sequence[FrameRecord], end: fl
             raise ValueError("Inference video is missing duration")
         duration = float(stream.duration * stream.time_base)
         if abs(duration - (end - records[0].timestamp)) > 0.001:
-            raise ValueError("Inference video duration differs from sampled interval")
+            raise ValueError("Inference video duration differs from processed interval")
         for frame in container.decode(stream):
             if count >= len(records) or frame.pts is None or frame.time_base is None:
                 raise ValueError("Inference video frame count or timestamp mismatch")
@@ -140,7 +140,7 @@ def validate_inference_video(root: Path, records: Sequence[FrameRecord], end: fl
                 raise ValueError("Inference video decode/dimension failure")
             timestamp = float(frame.pts * frame.time_base)
             if abs(timestamp - (record.timestamp - records[0].timestamp)) > 2 * TIME_BASE:
-                raise ValueError("Inference video timestamps differ from sampled frames")
+                raise ValueError("Inference video timestamps differ from frame records")
             count += 1
     if count != len(records):
-        raise ValueError("Inference video frame count differs from sampled frames")
+        raise ValueError("Inference video frame count differs from frame records")

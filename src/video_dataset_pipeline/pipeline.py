@@ -22,7 +22,7 @@ from .dataset import (
 )
 from .detection import filter_detections
 from .device import configure_device, gpu_snapshot
-from .inference_video import InferenceVideoWriter, validate_inference_video
+from .inference_video import InferenceVideoWriter
 from .metadata import RunMetadata, RunReport
 from .model import Detector, load_model_names
 from .records import FrameRecord
@@ -44,7 +44,7 @@ def _infer(
 
     仅将有有效检测的原分辨率图像暂存到 .staging，预览按抽检策略独立保存。
     图片落盘后才追加该帧的 inference.jsonl 记录；完整推理结束后再做数据集划分。
-    save_video 开启时还将全部采样帧流式编码为带框视频，包括无检测帧。
+    save_video 开启时对处理区间内所有源帧推理，并按源时间戳保存带框视频。
     """
     device = configure_device(config.device)
     gpu_snapshot(root, "before")
@@ -57,7 +57,7 @@ def _infer(
         first = True
         video_context = (
             InferenceVideoWriter(
-                root, frames.info["width"], frames.info["height"], config.sample_fps, frames.end
+                root, frames.info["width"], frames.info["height"], frames.info["fps"], frames.end
             )
             if config.save_video
             else nullcontext()
@@ -165,6 +165,11 @@ def run_pipeline(config: Config) -> RunReport:
     logging.getLogger().addHandler(handler)
     started = time.monotonic()
     try:
+        if config.save_video:
+            LOG.info(
+                "Video saving enabled: processing every source frame (%.3f FPS); sample_fps ignored",
+                info["fps"],
+            )
         _infer(config, root, run, names, frames, records)
         records, split_info = export_records(
             root, records, config.train_fraction, config.split_gap_seconds
@@ -193,8 +198,6 @@ def run_pipeline(config: Config) -> RunReport:
                 raise ValueError("Smoke sampling did not produce the requested number of frames")
             for record in records:
                 check_record_files(root, record)
-            if config.save_video:
-                validate_inference_video(root, records, frames.end)
             run["status"] = "smoke_complete"
             write_json(root / "SMOKE_COMPLETE.json", report)
         else:

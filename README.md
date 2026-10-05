@@ -63,13 +63,23 @@ uv run --locked video-dataset run --config configs/rm26_exchange.yaml \
 uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoyv3arV6
 ```
 
-默认 2 FPS，置信度阈值 0.5，IoU 阈值 0.7，推理尺寸 640，FP32，保存原始分辨率 JPEG（质量 95）。采用 PTS 顺序抽帧，不通过帧号猜测时间；例如 25 FPS 视频中的 0.5 秒采样点会落到 0.52 秒帧。模型负责 letterbox 与原图坐标映射，额外进行类别内 NMS，使 YOLO26 end-to-end 检测头也遵守配置的 IoU 阈值。
+未启用视频保存时，默认 2 FPS 抽帧；置信度阈值 0.5，IoU 阈值 0.7，推理尺寸 640，FP32，保存原始分辨率 JPEG（质量 95）。采用 PTS 顺序抽帧，不通过帧号猜测时间；例如 25 FPS 视频中的 0.5 秒采样点会落到 0.52 秒帧。模型负责 letterbox 与原图坐标映射，额外进行类别内 NMS，使 YOLO26 end-to-end 检测头也遵守配置的 IoU 阈值。
 
 配置中用 `device: 4` 选择 `nvidia-smi` 显示的 GPU4，也可以写 `device: cpu`。命令行通过 `--device 4` 或 `--device cpu` 覆盖。默认配置使用 GPU4；视频在 CPU 解码，不创建显示窗口或 GPU 渲染上下文。
 
-`save_video` 默认是 `false`。设为 `true` 或添加 `--save-video` 后，会在数据集根目录生成 `inference.mp4`；`--no-save-video` 可覆盖配置将其关闭。视频包含所有实际推理的采样帧，包括无检测帧和随后被划分间隔排除的帧，叠加有效检测框、类别、置信度、源时间戳和推理阶段状态。
+`save_video` 默认是 `false`。设为 `true` 或添加 `--save-video` 后，**禁止抽帧，逐帧推理并保存** `[start, end)` 区间内的全部源视频帧，在数据集根目录生成 `inference.mp4`。此时忽略 `sample_fps`；不允许同时设置 `smoke_frames > 0`，短片段测试请使用 `start/end`。`--no-save-video` 可覆盖配置将其关闭，恢复按配置抽帧。
 
-视频使用 H.264/MP4、无音频，保留采样帧之间的原时间间隔，最后一帧显示至处理区间结尾。默认 2 FPS 推理时，画面也按约 2 FPS 更新；冒烟模式仅包含指定的少量采样帧。保存视频不会增加推理次数或改变数据集筛选规则。编码在 CPU 上流式进行，保持原图尺寸；奇数宽高仅在右侧或底部补一个黑像素以兼容播放器。关闭时不会创建编码器或视频文件。
+视频使用 H.264/MP4、无音频，保留源帧时间戳和播放速度，最后一帧显示至处理区间结尾；25 FPS 源视频每秒处理并保存约 25 帧，变帧率视频也不会丢弃密集帧。视频包含无检测帧和随后被划分间隔排除的帧，叠加有效检测框、类别、置信度、源时间戳和推理阶段状态。数据集候选同样使用全部处理帧，再按置信度和时间划分规则筛选，因此启用后推理量及图片数量会增加。编码在 CPU 上流式进行，保持原图尺寸；奇数宽高仅在右侧或底部补一个黑像素以兼容播放器。关闭时不会创建编码器或视频文件。
+
+短片段验证示例（输出目录需为空；短片段设间隔为 0，以免训练/验证帧全部被排除）：
+
+```bash
+uv run --locked video-dataset run --config configs/rm26_exchange.yaml \
+  --save-video --start 100 --end 110 --split-gap-seconds 0 \
+  --output datasets/generated/rm26_exchange/recvlnoyv3arV6_video_fullrate_test
+```
+
+2026-10-05 使用 GPU4 验证该片段：250 次逐帧推理，输出 1920×1080、25 FPS、10 秒的 250 帧视频，时间戳间隔 40 ms；数据集 10 张训练图、3 张验证图，通过 Ultralytics 加载及视频完整性检查。核心包 65 个测试及 mypy、Ruff 检查通过，覆盖逐帧模式、变帧率、时间区间、冒烟抽帧冲突和异常清理。
 
 ## 输出与标注规则
 
@@ -81,7 +91,7 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
   config.yaml              # 生效的绝对路径与参数
   run.json                 # 视频信息、模型和 YAML 路径、类别、解码状态
   inference.jsonl          # 全视频逐帧推理提交记录
-  inference.mp4            # 可选：save_video 开启时保存带框采样视频
+  inference.mp4            # 可选：save_video 开启时保存逐帧带框视频
   frames.jsonl             # 筛选划分后的时间、框、置信度、文件路径
   report.json              # 数量、类别、置信度统计
   validation.json          # 完整性与真实 Ultralytics 数据加载结果
@@ -95,7 +105,7 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
 
 每个标签严格为 `class_id x_center y_center width height`，坐标以原图宽高归一化到 `[0,1]`。置信度仅保存在元数据，不写入训练标签。默认不收录没有有效检测框的帧，这些帧可能存在漏检，不能直接视为负样本。
 
-先识别完整视频（默认 2 FPS），仅选择至少有一个框达到置信度阈值的画面，然后按这些入选画面的时间顺序，以数量划分前 80% / 后 20%。切分位置取两组相邻画面的时间中点，再剔除分界前后各 5 秒内的入选帧。`train_fraction` 与 `split_gap_seconds` 均可配置；显式指定 `start/end` 时只处理该区间。报告中的 `included_frames`、`no_detection_frames`、`split_gap_frames` 互斥，其和等于候选帧数；`confidence_qualified_frames` 是分界间隔剔除前通过阈值的画面数。80/20 是间隔剔除前的入选图片比例；剔除后数量和各类别比例可能变化。片头片尾的误检仍可能通过阈值，需结合抽检预览判断。
+先识别完整视频（默认 2 FPS 抽帧，保存视频时逐帧处理），仅选择至少有一个框达到置信度阈值的画面，然后按这些入选画面的时间顺序，以数量划分前 80% / 后 20%。切分位置取两组相邻画面的时间中点，再剔除分界前后各 5 秒内的入选帧。`train_fraction` 与 `split_gap_seconds` 均可配置；显式指定 `start/end` 时只处理该区间。报告中的 `included_frames`、`no_detection_frames`、`split_gap_frames` 互斥，其和等于候选帧数；`confidence_qualified_frames` 是分界间隔剔除前通过阈值的画面数。80/20 是间隔剔除前的入选图片比例；剔除后数量和各类别比例可能变化。片头片尾的误检仍可能通过阈值，需结合抽检预览判断。
 
 预览覆盖 20 个时间桶、每个出现类别、低置信度和无检测样例。模型仍可能误检或漏检；本数据是伪标签，不是人工真值，验证集不能用于宣称模型真实精度。未自动剪裁画面中的赛事 UI 或小窗。
 

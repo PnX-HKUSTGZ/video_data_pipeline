@@ -76,6 +76,10 @@ class Config:
             raise ValueError("smoke_frames must be nonnegative")
         if not isinstance(self.save_video, bool):
             raise TypeError("save_video must be a boolean")
+        if self.save_video and self.smoke_frames:
+            raise ValueError(
+                "save_video cannot be combined with smoke_frames; use start/end instead"
+            )
         object.__setattr__(self, "device", parse_device(self.device))
 
     def to_dict(self) -> ConfigValues:

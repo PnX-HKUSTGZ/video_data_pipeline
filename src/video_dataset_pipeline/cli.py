@@ -28,7 +28,7 @@ def main() -> None:
         "--save-video",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Save annotated sampled frames to inference.mp4 (default: disabled)",
+        help="Infer and save every source frame to inference.mp4; disables sampling",
     )
     for field in (
         "sample-fps",

@@ -11,9 +11,10 @@ from video_dataset_pipeline import pipeline
 from video_dataset_pipeline.config import Config
 from video_dataset_pipeline.dataset import read_records, validate_dataset
 from video_dataset_pipeline.detection import filter_detections, label_text, split_selected_frames
+from video_dataset_pipeline.inference_video import InferenceVideoWriter
 from video_dataset_pipeline.records import Detection, FrameRecord, RawDetection
 from video_dataset_pipeline.util import read_json
-from video_dataset_pipeline.video import TimestampSampler
+from video_dataset_pipeline.video import TimestampSampler, VideoFrames, probe_video
 
 
 def frame_record(index, positive=True):
@@ -226,25 +227,81 @@ def test_incomplete_decode_is_not_marked_complete(synthetic_run, monkeypatch):
     assert read_json(root / "run.json")["decode"]["decode_complete"] is False
 
 
-@pytest.mark.parametrize("smoke_frames", [0, 6])
-def test_pipeline_video_contains_all_sampled_frames(synthetic_run, smoke_frames):
-    config, _ = synthetic_run
-    config = replace(config, save_video=True, smoke_frames=smoke_frames)
+@pytest.mark.parametrize("sample_fps", [2, 20])
+def test_pipeline_video_infers_and_saves_every_source_frame(synthetic_run, sample_fps):
+    config, detector = synthetic_run
+    config = replace(config, save_video=True, sample_fps=sample_fps)
     report = pipeline.run_pipeline(config)
     root = Path(config.output)
+    assert detector.calls == report["candidate_frames"] == 120
+    assert [r.frame_index for r in read_records(root / "frames.jsonl")] == list(range(120))
     assert report["no_detection_frames"] > 0
+    assert report["split_gap_frames"] > 0
     assert read_json(root / "run.json")["config"]["save_video"] is True
     with av.open(str(root / "inference.mp4")) as container:
         stream = container.streams.video[0]
         assert float(stream.duration * stream.time_base) == pytest.approx(12.0)
+        assert float(stream.average_rate) == pytest.approx(10.0)
         frames = list(container.decode(stream))
-        assert len(frames) == report["candidate_frames"] == (smoke_frames or 24)
+        assert len(frames) == report["candidate_frames"]
+        assert [float(f.pts * f.time_base) for f in frames] == pytest.approx(
+            [i / 10 for i in range(120)]
+        )
         assert len(frames) > report["included_frames"]
+    assert (root / "COMPLETE.json").exists()
+    assert not (root / "SMOKE_COMPLETE.json").exists()
     assert not (root / "inference.mp4.tmp").exists()
-    if not smoke_frames:
-        (root / "inference.mp4").unlink()
-        with pytest.raises(FileNotFoundError):
-            validate_dataset(root, False)
+    (root / "inference.mp4").unlink()
+    with pytest.raises(FileNotFoundError):
+        validate_dataset(root, False)
+
+
+def test_saving_video_rejects_smoke_sampling(synthetic_run):
+    config, detector = synthetic_run
+    with pytest.raises(ValueError, match="save_video cannot be combined with smoke_frames"):
+        pipeline.run_pipeline(replace(config, save_video=True, smoke_frames=6))
+    assert detector.calls == 0
+    assert not Path(config.output).exists()
+
+
+def test_pipeline_video_honors_interval_without_sampling(synthetic_run):
+    config, detector = synthetic_run
+    config = replace(config, save_video=True, start=1.05, end=2.55, split_gap_seconds=0)
+    report = pipeline.run_pipeline(config)
+    root = Path(config.output)
+    records = read_records(root / "frames.jsonl")
+    assert detector.calls == report["candidate_frames"] == 15
+    assert [r.frame_index for r in records] == list(range(11, 26))
+    assert [r.timestamp for r in records] == pytest.approx([i / 10 for i in range(11, 26)])
+    with av.open(str(root / "inference.mp4")) as container:
+        stream = container.streams.video[0]
+        assert float(stream.duration * stream.time_base) == pytest.approx(1.45)
+        frames = list(container.decode(stream))
+        assert len(frames) == 15
+        assert [float(f.pts * f.time_base) for f in frames] == pytest.approx(
+            [i / 10 for i in range(15)]
+        )
+
+
+def test_saving_video_keeps_every_variable_rate_source_frame(tmp_path):
+    timestamps = [0, 0.04, 0.2, 0.22, 0.8, 0.9]
+    image = np.zeros((96, 160, 3), dtype=np.uint8)
+    with InferenceVideoWriter(tmp_path, 160, 96, 25, 1.0) as writer:
+        for timestamp in timestamps:
+            writer.write(image, timestamp)
+    path = tmp_path / "inference.mp4"
+    config = Config(
+        input=str(path),
+        output=str(tmp_path / "out"),
+        model="unused",
+        model_yaml="unused",
+        save_video=True,
+    )
+    source = VideoFrames(path, probe_video(path), config)
+    frames = list(source)
+    assert [index for index, _, _ in frames] == list(range(len(timestamps)))
+    assert [timestamp for _, timestamp, _ in frames] == pytest.approx(timestamps)
+    assert source.stats["decode_complete"] is True
 
 
 def test_pipeline_failure_discards_incomplete_video(synthetic_run):

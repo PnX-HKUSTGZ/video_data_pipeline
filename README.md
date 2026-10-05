@@ -1,6 +1,8 @@
-# 视频 → YOLO 检测数据集
+# 视频 → YOLO 检测 / 关键点数据集
 
-使用指定 RM26 工程机器人模型对视频抽帧并生成 **伪标签**。输出为 YOLO11/Ultralytics 通用检测格式；无需先转码视频，也不包含训练或人工审核界面。
+使用指定 RM26 工程机器人模型处理视频并生成 **伪标签**。支持 YOLO 检测和 YOLO pose 关键点格式；模型生成流程无需先转码视频，也不包含训练。
+
+检测模式使用 `configs/rm26_exchange.yaml`；关键点模式使用 `configs/rm26_exchange_pose.yaml`，详见 [YOLO pose 使用与验证](docs/pose.md)。
 
 ## 环境
 
@@ -27,7 +29,7 @@ uv run --locked video-dataset download-model --endpoint https://hf-mirror.com
 - revision：`afab41a8b61c399bf71480f0fd52352ed660b994`
 - 权重：`models/RM26_engineer_exchange_model/yolo/v10.12/best.pt`
 - 类别来自权重和发布元数据，必须一致：`0: pillar`、`1: exchange`。
-- 发布的纯检测模型实际为 **YOLO26s**；YOLO11 训练可以读取其生成的数据集。姿态模型和 LiteHR 权重不参与本流程。
+- 发布的纯检测模型实际为 **YOLO26s**；YOLO11 训练可以读取其生成的数据集。姿态模型使用独立的 pose 配置；LiteHR 权重不参与本流程。
 
 这是可选的便捷下载命令，仅下载权重和类别 YAML；已有文件直接复用。下载不加锁，不生成额外的模型清单，也不进行哈希校验。下载失败会清理临时文件，下次从头下载。模型也可以自行准备，启动时只读取配置中的两个本地文件：
 
@@ -103,9 +105,9 @@ uv run --locked video-dataset run --config configs/rm26_exchange.yaml \
 
 图片与标签以“视频文件名_f帧号”命名，例如 `recvlnoyv3arV6_红方工程第一视角_f00000000.jpg`。
 
-每个标签严格为 `class_id x_center y_center width height`，坐标以原图宽高归一化到 `[0,1]`。置信度仅保存在元数据，不写入训练标签。默认不收录没有有效检测框的帧，这些帧可能存在漏检，不能直接视为负样本。
+检测模式每个标签严格为 `class_id x_center y_center width height`，坐标以原图宽高归一化到 `[0,1]`。置信度仅保存在元数据，不写入训练标签。默认不收录没有有效检测框的帧，这些帧可能存在漏检，不能直接视为负样本。
 
-先识别完整视频（默认 2 FPS 抽帧，保存视频时逐帧处理），仅选择至少有一个框达到置信度阈值的画面，然后按这些入选画面的时间顺序，以数量划分前 80% / 后 20%。切分位置取两组相邻画面的时间中点，再剔除分界前后各 5 秒内的入选帧。`train_fraction` 与 `split_gap_seconds` 均可配置；显式指定 `start/end` 时只处理该区间。报告中的 `included_frames`、`no_detection_frames`、`split_gap_frames` 互斥，其和等于候选帧数；`confidence_qualified_frames` 是分界间隔剔除前通过阈值的画面数。80/20 是间隔剔除前的入选图片比例；剔除后数量和各类别比例可能变化。片头片尾的误检仍可能通过阈值，需结合抽检预览判断。
+检测模式先识别完整视频（默认 2 FPS 抽帧，保存视频时逐帧处理），仅选择至少有一个框达到置信度阈值的画面，然后按这些入选画面的时间顺序，以数量划分前 80% / 后 20%。切分位置取两组相邻画面的时间中点，再剔除分界前后各 5 秒内的入选帧。`train_fraction` 与 `split_gap_seconds` 均可配置；显式指定 `start/end` 时只处理该区间。报告中的 `included_frames`、`no_detection_frames`、`split_gap_frames` 互斥，其和等于候选帧数；`confidence_qualified_frames` 是分界间隔剔除前通过阈值的画面数。80/20 是间隔剔除前的入选图片比例；剔除后数量和各类别比例可能变化。片头片尾的误检仍可能通过阈值，需结合抽检预览判断。
 
 预览覆盖 20 个时间桶、每个出现类别、低置信度和无检测样例。模型仍可能误检或漏检；本数据是伪标签，不是人工真值，验证集不能用于宣称模型真实精度。未自动剪裁画面中的赛事 UI 或小窗。
 
@@ -191,7 +193,7 @@ uv run --locked ruff format --check src tests
 
 核心数据流使用 `records.py` 中的 `RawDetection`、`Detection`、`RejectedDetection` 和 `FrameRecord`。检测对象不可变，框为四元素元组；帧记录保存处理状态及产物路径。读取记录后通过 `record.timestamp`、`record.detections` 等属性访问，导出通过 `dataclasses.replace` 复制帧记录。图像仍是 uint8 BGR 数组，采样器仍返回 `(帧号, 时间戳, 图像)`。
 
-`metadata.py` 使用 `TypedDict` 描述视频、划分、运行状态和报告，运行时仍是普通字典。`FrameRecord.to_dict/from_dict` 仅用于 JSON/JSONL 边界转换，保留 schema 4 的字段、坐标数组和可选字段省略规则，已有数据集无需迁移。
+`metadata.py` 使用 `TypedDict` 描述视频、划分、运行状态和报告，运行时仍是普通字典。`FrameRecord.to_dict/from_dict` 仅用于 JSON/JSONL 边界转换，检测模式保留 schema 4 的字段、坐标数组和可选字段省略规则；pose 使用 schema 5，新增强类型关键点字段，已有数据集无需迁移。
 
 mypy 对整个核心包启用严格检查并禁止显式 `Any`，开发依赖由 uv 锁定。JSON/YAML 和第三方返回值在读取处进行类型收窄；唯一的局部导入忽略用于尚未提供 `py.typed` 标记的 `torchvision.ops`。PyTorch/Ultralytics 继续在设备配置后延迟导入。
 

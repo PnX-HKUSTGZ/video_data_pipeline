@@ -1,4 +1,3 @@
-import fcntl
 import logging
 import shutil
 import time
@@ -25,17 +24,6 @@ from .util import atomic_bytes, fingerprint, read_json, sha256, write_json
 from .video import VideoFrames, probe_video
 
 LOG = logging.getLogger(__name__)
-
-
-def run_pipeline(config, resume=False):
-    root = Path(config.output)
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / ".run.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RuntimeError(f"Another process owns output directory: {root}") from None
-        return _run_locked(config, root, resume)
 
 
 def _infer(config, root, run, names, frames, records):
@@ -117,7 +105,9 @@ def _infer(config, root, run, names, frames, records):
         gpu_snapshot(root, "shutdown")
 
 
-def _run_locked(config, root, resume):
+def run_pipeline(config, resume=False):
+    root = Path(config.output)
+    root.mkdir(parents=True, exist_ok=True)
     model_manifest = verify_model(config.model)
     info = probe_video(config.input)
     frames = VideoFrames(config.input, info, config)
@@ -164,7 +154,7 @@ def _run_locked(config, root, resume):
         ):
             raise ValueError("Committed inference count/hash mismatch")
     else:
-        if any(p.name != ".run.lock" for p in root.iterdir()):
+        if any(root.iterdir()):
             raise ValueError("Refusing to mix generated files into a nonempty output directory")
         records = []
         run = {

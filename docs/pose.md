@@ -2,6 +2,8 @@
 
 输入视频和 Ultralytics YOLO pose `.pt` 权重，输出标准 YOLO pose 伪标签。与检测模式共用解码、帧记录、时间划分、预览和视频保存流程；不包含模型训练、LiteHR 或其他两阶段姿态模型。
 
+多个文件或目录的输入、逐视频划分与合并方式见 [多视频使用说明](multi-video.md)。
+
 ## 使用
 
 从仓库根目录执行：
@@ -64,7 +66,7 @@ class_id cx cy w h x1 y1 v1 ... xK yK vK
 
 ## 记录、预览与视频
 
-检测模式继续使用 schema 4，省略 `keypoints`；旧记录无需迁移。pose 使用 schema 5，`run.json` 记录任务、模型的原始点维度和可选点名/翻转映射。`FrameRecord` 的检测对象保存不可变的 `RawKeypoint`/`Keypoint`，JSONL 保留点原始坐标、分数、归一化坐标、标记和筛选原因。
+新生成的检测和 pose 数据集统一使用 schema 6，帧记录携带 `source_id`，`run.json.videos` 保存逐视频信息；旧 schema 4/5 数据集仍可读取和验证，无需迁移。检测记录省略 `keypoints`，pose 在 `run.json` 中记录任务、模型的原始点维度和可选点名/翻转映射。`FrameRecord` 的检测对象保存不可变的 `RawKeypoint`/`Keypoint`，JSONL 保留点原始坐标、分数、归一化坐标、标记和筛选原因。
 
 预览及视频绘制有效点和点名，缺失点不绘制。增加无有效点和部分缺失点的抽检样例。框和关键点都是模型伪标签，抽检材料用于检查模型输出，数据加载校验不能证明识别精度。
 

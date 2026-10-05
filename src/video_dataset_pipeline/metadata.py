@@ -77,8 +77,38 @@ class ValidationResult(DatasetSummary):
     ultralytics_loader: dict[Split, LoaderCount]
 
 
+SourceStatus = Literal["pending", "inference", "exporting", "complete", "failed"]
+
+
+class SourceMetadata(TypedDict):
+    """固定清单中的视频及其独立解码、划分和保存状态。"""
+
+    source_id: str
+    input: str
+    video: VideoInfo
+    start: float
+    end: float
+    decode: DecodeStats
+    status: SourceStatus
+    candidate_frames: int
+    split: NotRequired[SplitInfo]
+    inference_video: NotRequired[str]
+    error: NotRequired[str]
+
+
+class SourceReport(DatasetSummary):
+    """单个视频的统计，零有效检测的视频也保留。"""
+
+    source_id: str
+    input: str
+    decode: DecodeStats
+    split: SplitInfo | None
+    status: SourceStatus
+
+
 class RunReport(DatasetSummary):
-    split: SplitInfo
+    split: dict[str, SplitInfo]
+    videos: list[SourceReport]
     pseudo_labels: bool
     evaluation_warning: str
     run_id: str
@@ -92,8 +122,7 @@ class RunMetadata(TypedDict):
     pose: NotRequired[PoseMetadata]
     run_id: str
     config: ConfigValues
-    video: VideoInfo
-    end: float
+    videos: list[SourceMetadata]
     names: dict[int, str]
     model: str
     model_yaml: str
@@ -101,6 +130,6 @@ class RunMetadata(TypedDict):
     status: Literal["inference", "exporting", "validating", "complete", "smoke_complete", "failed"]
     decode: NotRequired[DecodeStats]
     candidate_frames: NotRequired[int]
-    split: NotRequired[SplitInfo]
+    split: NotRequired[dict[str, SplitInfo]]
     elapsed_seconds_this_attempt: NotRequired[float]
     error: NotRequired[str]

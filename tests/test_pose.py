@@ -202,7 +202,7 @@ def test_pose_pipeline_retains_boxes_and_excludes_frames_without_points(pose_run
     assert report["keypoints"]["valid_points"] == len(included)
     assert report["keypoints"]["missing_points"] == 3 * len(included)
     assert yaml.safe_load((root / "data.yaml").read_text())["kpt_shape"] == [2, 3]
-    assert json.loads((root / "run.json").read_text())["schema_version"] == 5
+    assert json.loads((root / "run.json").read_text())["schema_version"] == 6
     assert (root / "COMPLETE.json").exists()
     assert not (root / ".staging").exists()
     result = validate_dataset(root)  # Real Ultralytics pose loader, including masks.

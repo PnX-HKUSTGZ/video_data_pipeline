@@ -24,13 +24,13 @@ from .metadata import (
 )
 from .pose import check_keypoint_shape, filter_keypoints, parse_pose_metadata
 from .records import BGRImage, FrameRecord, Split
-from .util import as_float, as_int, as_mapping, as_str, atomic_bytes, read_json, write_json
+from .util import as_float, as_int, as_list, as_mapping, as_str, atomic_bytes, read_json, write_json
 
 SPLITS: tuple[Split, Split] = ("train", "val")
 
 
 def read_records(path: str | Path) -> list[FrameRecord]:
-    """读取 JSONL 帧清单，要求帧号唯一且递增，每行具有完整记录和末尾换行。
+    """读取 JSONL 帧清单，要求同一来源内帧号唯一且递增，每行具有完整记录和末尾换行。
 
     文件不存在时返回空列表。解析或字段类型错误会报告从 1 开始的行号，
     不修改源文件，也不截断或跳过坏记录。
@@ -49,9 +49,13 @@ def read_records(path: str | Path) -> list[FrameRecord]:
         except (ValueError, KeyError, TypeError) as error:
             raise ValueError(f"Invalid frame record {i + 1}: {error}") from error
         records.append(record)
-    ids = [r.frame_index for r in records]
-    if ids != sorted(set(ids)):
-        raise ValueError("Manifest frame IDs must be unique and ordered")
+    previous: dict[str | None, int] = {}
+    for line_number, record in enumerate(records, 1):
+        if record.frame_index <= previous.get(record.source_id, -1):
+            raise ValueError(
+                f"Invalid frame record {line_number}: frame IDs must be unique and ordered per source"
+            )
+        previous[record.source_id] = record.frame_index
     return records
 
 
@@ -71,14 +75,21 @@ def save_jpeg(path: str | Path, image: BGRImage, quality: int) -> None:
 
 
 def export_records(
-    root: Path, inference: Sequence[FrameRecord], train_fraction: float, gap: float
+    root: Path,
+    inference: Sequence[FrameRecord],
+    train_fraction: float,
+    gap: float,
+    append: bool = False,
 ) -> tuple[list[FrameRecord], SplitInfo]:
     """从按时间排序的推理记录导出图片、标签和最终帧清单。
 
     返回记录副本及划分统计，不修改传入记录。入选图片通过硬链接复用暂存
     图像字节，要求目标 images/labels 子目录已创建且与暂存目录位于同一文件系统。
     最终清单保留无检测及分界排除记录，但移除所有 candidate_image 暂存路径。
+    append=True 时追加到合并清单，调用方须确保输入只属于一个视频。
     """
+    if len({r.source_id for r in inference}) > 1:
+        raise ValueError("Export requires records from a single source")
     assignments, split_info = split_selected_frames(inference, train_fraction, gap)
     records = []
     for source in inference:
@@ -101,10 +112,14 @@ def export_records(
             record.image = str(image_path)
             record.label = str(label_path)
         records.append(record)
-    atomic_bytes(
-        root / "frames.jsonl",
-        "".join(json.dumps(r.to_dict(), ensure_ascii=False) + "\n" for r in records).encode(),
-    )
+    payload = "".join(json.dumps(r.to_dict(), ensure_ascii=False) + "\n" for r in records).encode()
+    if append:
+        with (root / "frames.jsonl").open("ab") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    else:
+        atomic_bytes(root / "frames.jsonl", payload)
     return records, split_info
 
 
@@ -295,6 +310,113 @@ def summarize(
     return result
 
 
+def _validate_sources(
+    root: Path,
+    run: Mapping[str, object],
+    config: Mapping[str, object],
+    records: Sequence[FrameRecord],
+) -> dict[tuple[str | None, int], Split | None]:
+    """校验来源、解码及逐视频划分；旧版元数据在读取边界映射为单个来源。
+
+    不重新扫描输入目录，也不要求原视频仍然存在，校验以本次固定清单为准。
+    各视频只在自身时间轴内检查顺序、处理范围及保存视频的时间戳。
+    """
+    modern = run["schema_version"] == 6
+    sources = (
+        [as_mapping(v) for v in as_list(run["videos"])]
+        if modern
+        else [
+            {
+                "input": config["input"],
+                "video": run["video"],
+                "end": run["end"],
+                "start": config["start"],
+                "decode": run["decode"],
+                "split": run["split"],
+                "candidate_frames": run["candidate_frames"],
+                "inference_video": "inference.mp4",
+            }
+        ]
+    )
+    if not sources:
+        raise ValueError("Run requires at least one source video")
+    grouped: dict[str | None, list[FrameRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.source_id, []).append(record)
+    source_ids: list[str | None] = []
+    paths: set[str] = set()
+    splits: dict[str, SplitInfo] = {}
+    assignments: dict[tuple[str | None, int], Split | None] = {}
+    decoded_frames = 0
+    for index, source in enumerate(sources, 1):
+        source_id = as_str(source["source_id"]) if modern else None
+        if modern and source_id != f"v{index:04d}":
+            raise ValueError("Source IDs must match the ordered input list")
+        path = as_str(source["input"])
+        if path in paths:
+            raise ValueError("Duplicate source video path")
+        paths.add(path)
+        source_ids.append(source_id)
+        group = grouped.get(source_id, [])
+        if len(group) != as_int(source["candidate_frames"]):
+            raise ValueError(f"{source_id}: source frame count mismatch")
+        if modern and source["status"] != "complete":
+            raise ValueError(f"{source_id}: source processing did not complete")
+        decode = as_mapping(source["decode"])
+        if decode.get("decode_complete") is not True:
+            raise ValueError(f"{source_id}: Video decode did not complete")
+        decoded_frames += as_int(decode["decoded_frames"])
+        info = as_mapping(source["video"])
+        start, end = as_float(source["start"]), as_float(source["end"])
+        configured_end = config.get("end")
+        expected_end = min(
+            as_float(configured_end) if configured_end is not None else as_float(info["duration"]),
+            as_float(info["duration"]),
+        )
+        if start != as_float(config["start"]) or end != expected_end or start >= end:
+            raise ValueError(f"{source_id}: processing interval disagrees with config")
+        previous = -1.0
+        for record in group:
+            if not math.isfinite(record.timestamp) or record.timestamp <= previous:
+                raise ValueError(f"{source_id}: Manifest timestamps must be increasing")
+            if not start - 1e-7 <= record.timestamp < end:
+                raise ValueError(f"{source_id}: frame timestamp outside processing interval")
+            if (record.width, record.height) != (as_int(info["width"]), as_int(info["height"])):
+                raise ValueError(f"{source_id}: frame dimensions differ from source video")
+            previous = record.timestamp
+        selected, split_info = split_selected_frames(
+            group, as_float(config["train_fraction"]), as_float(config["split_gap_seconds"])
+        )
+        if source.get("split") != split_info:
+            raise ValueError(
+                f"{source_id}: Split metadata does not match confidence-qualified frame selection"
+            )
+        if source_id is not None:
+            splits[source_id] = split_info
+        assignments.update(((source_id, frame), split) for frame, split in selected.items())
+        if config.get("save_video", False):
+            expected_video = (
+                "inference.mp4"
+                if len(sources) == 1
+                else f"inference_videos/{source_id}_{Path(path).stem}.mp4"
+            )
+            if source.get("inference_video") != expected_video:
+                raise ValueError(f"{source_id}: inference video path mismatch")
+            validate_inference_video(root, group, end, expected_video)
+    if set(grouped) != set(source_ids):
+        raise ValueError("Frame records contain missing or unknown sources")
+    ordered = [(r.source_id, r.frame_index) for sid in source_ids for r in grouped[sid]]
+    if ordered != [(r.source_id, r.frame_index) for r in records]:
+        raise ValueError("Frame records must follow source order")
+    if modern:
+        if run.get("split") != splits:
+            raise ValueError("Aggregate split metadata does not match source splits")
+        aggregate = as_mapping(run["decode"])
+        if as_int(aggregate["decoded_frames"]) != decoded_frames:
+            raise ValueError("Aggregate decode count does not match source counts")
+    return assignments
+
+
 def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> ValidationResult:
     """核对解码完成状态、逐帧划分、图片标签及文件集合，成功后写 validation.json。
 
@@ -311,7 +433,12 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
     names = {int(k): as_str(v) for k, v in as_mapping(run["names"]).items()}
     data = as_mapping(yaml.safe_load((root / "data.yaml").read_text()))
     task = as_str(run.get("task", "detect"))
-    if (task, run.get("schema_version")) not in (("detect", 4), ("pose", 5)):
+    if (task, run.get("schema_version")) not in (
+        ("detect", 4),
+        ("pose", 5),
+        ("detect", 6),
+        ("pose", 6),
+    ):
         raise ValueError("Unsupported task/schema_version combination")
     pose = parse_pose_metadata(run["pose"], len(names)) if task == "pose" else None
     shape = pose["source_kpt_shape"] if pose is not None else None
@@ -333,18 +460,10 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
     if not as_mapping(run.get("decode", {})).get("decode_complete"):
         raise ValueError("Video decode did not complete")
     expected_files: set[str] = set()
-    previous = -1.0
-    assignments, split_info = split_selected_frames(
-        records, as_float(config["train_fraction"]), as_float(config["split_gap_seconds"])
-    )
-    if run.get("split") != split_info:
-        raise ValueError("Split metadata does not match confidence-qualified frame selection")
+    assignments = _validate_sources(root, run, config, records)
     for record in records:
         check_record_files(root, record)
-        if record.timestamp <= previous:
-            raise ValueError("Manifest timestamps must be increasing")
-        previous = record.timestamp
-        expected_split = assignments.get(record.frame_index)
+        expected_split = assignments.get((record.source_id, record.frame_index))
         status = candidate_status(record.detections)
         expected_status = (
             status
@@ -385,6 +504,8 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
             continue
         if record.image is None or record.label is None:
             raise ValueError("Included frame is missing image/label paths")
+        if record.image in expected_files or record.label in expected_files:
+            raise ValueError("Different frame records reference the same artifact")
         expected_files.update((record.image, record.label))
         image = cv2.imdecode(np.fromfile(root / record.image, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None or list(image.shape[:2]) != [record.height, record.width]:
@@ -428,8 +549,6 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
     }
     if actual_files != expected_files:
         raise ValueError(f"Dataset artifact set mismatch: {actual_files ^ expected_files}")
-    if config.get("save_video", False):
-        validate_inference_video(root, records, as_float(run["end"]))
     summary = summarize(records, names, pose)
     if min(summary["splits"].values()) == 0:
         raise ValueError(f"Dataset requires positive samples in both splits: {summary['splits']}")
@@ -507,7 +626,7 @@ def write_inspection_report(root: Path, records: Sequence[FrameRecord], report: 
     for record in preview_records:
         assert record.preview is not None
         filename = html.escape(Path(record.preview).name)
-        caption = f"{record.timestamp:.2f}s | {record.status} | {', '.join(record.preview_reasons)}"
+        caption = f"{record.source_id or ''} | {record.timestamp:.2f}s | {record.status} | {', '.join(record.preview_reasons)}"
         cards.append(
             f'<figure><a href="{filename}"><img loading="lazy" src="{filename}"></a>'
             f"<figcaption>{html.escape(caption)}</figcaption></figure>"
@@ -523,7 +642,7 @@ def write_inspection_report(root: Path, records: Sequence[FrameRecord], report: 
         tile[:180] = cv2.resize(image, (320, 180))
         cv2.putText(
             tile,
-            f"{record.timestamp:.2f}s | {record.status}",
+            f"{record.source_id or ''} | {record.timestamp:.2f}s | {record.status}",
             (5, 201),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,

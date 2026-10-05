@@ -144,9 +144,10 @@ class FrameRecord:
     label: str | None = None
     preview: str | None = None
     preview_reasons: list[str] = field(default_factory=list)
+    source_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        """转换为兼容 schema 4/5 的字段，框写为数组，省略未设置的产物路径。
+        """转换为兼容 schema 4/5/6 的字段，框写为数组，省略未设置的产物路径。
 
         split 即使为 None 也保留；preview_reasons 仅在存在预览时写入，
         使 JSON/JSONL 结构与已有数据集兼容。
@@ -198,6 +199,8 @@ class FrameRecord:
                 record[key] = path
         if self.preview is not None:
             record["preview_reasons"] = self.preview_reasons.copy()
+        if self.source_id is not None:
+            record["source_id"] = self.source_id
         return record
 
     @classmethod
@@ -254,7 +257,11 @@ class FrameRecord:
                     else None,
                 )
             )
+        source_id = as_str(data["source_id"]) if "source_id" in data else None
+        if source_id == "":
+            raise ValueError("source_id must not be empty")
         return cls(
+            source_id=source_id,
             frame_index=as_int(data["frame_index"]),
             timestamp=as_float(data["timestamp"]),
             width=as_int(data["width"]),

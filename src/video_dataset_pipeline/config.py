@@ -7,11 +7,11 @@ from typing import NotRequired, TypedDict, cast
 import yaml
 
 from .device import parse_device
-from .util import as_float, as_int, as_mapping, as_str
+from .util import as_float, as_int, as_list, as_mapping, as_str
 
 
 class ConfigValues(TypedDict):
-    input: str
+    input: str | list[str]
     output: str
     model: str
     model_yaml: str
@@ -28,13 +28,14 @@ class ConfigValues(TypedDict):
     jpeg_quality: NotRequired[int]
     smoke_frames: NotRequired[int]
     save_video: NotRequired[bool]
+    recursive: NotRequired[bool]
 
 
 @dataclass(frozen=True)
 class Config:
     """单次运行参数；时间以秒计，device 使用物理 GPU 编号或 'cpu'。"""
 
-    input: str
+    input: str | list[str]
     output: str
     model: str
     model_yaml: str
@@ -51,9 +52,15 @@ class Config:
     jpeg_quality: int = 95
     smoke_frames: int = 0
     save_video: bool = False
+    recursive: bool = False
 
     def __post_init__(self) -> None:
         """校验采样、阈值和图像参数的范围，并将设备编号字符串转换为整数。"""
+        values = [self.input] if isinstance(self.input, str) else as_list(self.input)
+        if not values or any(not as_str(value).strip() for value in values):
+            raise ValueError("input must contain nonempty file or directory paths")
+        if not isinstance(self.recursive, bool):
+            raise TypeError("recursive must be a boolean")
         for key in (
             "sample_fps",
             "start",
@@ -95,15 +102,27 @@ class Config:
 def load_config(path: str | Path, overrides: Mapping[str, object] | None = None) -> Config:
     """读取 YAML 并应用非 None 的命令行覆盖值，返回已校验的配置。
 
-    相对路径以当前工作目录为基准，转换为绝对路径；同时检查输入视频、权重和
-    类别 YAML 存在。未知字段或错误值会报错，输出目录是否为空由运行入口检查。
+    相对路径以当前工作目录为基准转换为绝对路径，并检查权重和类别 YAML。
+    输入展开、视频检查及空输出目录检查由运行入口完成。未知字段或错误值报错。
     """
     data = as_mapping(yaml.safe_load(Path(path).read_text()) or {})
     allowed = {f.name for f in fields(Config)}
     data.update({k: v for k, v in (overrides or {}).items() if v is not None})
     if unknown := set(data) - allowed:
         raise ValueError(f"Unknown config keys: {sorted(unknown)}")
-    for key in ("input", "output", "model", "model_yaml"):
+    raw_input = data.get("input")
+    if raw_input is None:
+        raise ValueError("Missing required config field: input")
+    if isinstance(raw_input, str):
+        if not raw_input.strip():
+            raise ValueError("input contains an empty path")
+        data["input"] = str(Path(raw_input).resolve())
+    else:
+        inputs = [as_str(p) for p in as_list(raw_input)]
+        if not inputs or any(not p.strip() for p in inputs):
+            raise ValueError("input must contain nonempty paths")
+        data["input"] = [str(Path(p).resolve()) for p in inputs]
+    for key in ("output", "model", "model_yaml"):
         if not data.get(key):
             raise ValueError(f"Missing required config field: {key}")
         data[key] = str(Path(as_str(data[key])).resolve())
@@ -126,11 +145,9 @@ def load_config(path: str | Path, overrides: Mapping[str, object] | None = None)
     if "device" in data:
         data["device"] = parse_device(data["device"])
     config = Config(**cast(ConfigValues, data))
-    if not Path(config.input).is_file():
-        raise ValueError(f"Input video missing: {config.input}")
     for key in ("model", "model_yaml"):
         if not Path(getattr(config, key)).is_file():
             raise ValueError(f"Configured {key} file missing: {getattr(config, key)}")
-    if Path(config.output) in (Path(config.input).parent, Path(config.model).parent):
+    if Path(config.output) == Path(config.model).parent:
         raise ValueError("Output must be separate from source video and model directories")
     return config

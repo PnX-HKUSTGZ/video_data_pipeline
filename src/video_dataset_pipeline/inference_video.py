@@ -22,10 +22,18 @@ TIME_BASE = Fraction(1, 90000)
 class InferenceVideoWriter:
     """按原始时间间隔保存每个源帧；仅在成功关闭编码器后发布 MP4 文件。"""
 
-    def __init__(self, root: Path, width: int, height: int, fps: float, end: float) -> None:
+    def __init__(
+        self,
+        root: Path,
+        width: int,
+        height: int,
+        fps: float,
+        end: float,
+        filename: str = INFERENCE_VIDEO,
+    ) -> None:
         """设置原图尺寸、源帧率和源视频中的结束秒数，暂不打开输出文件。"""
-        self.path = root / INFERENCE_VIDEO
-        self.temporary = root / f"{INFERENCE_VIDEO}.tmp"
+        self.path = root / filename
+        self.temporary = self.path.with_name(self.path.name + ".tmp")
         self.width, self.height, self.fps, self.end = width, height, fps, end
         self._container: OutputContainer | None = None
         self._stream: VideoStream | None = None
@@ -34,6 +42,7 @@ class InferenceVideoWriter:
 
     def __enter__(self) -> Self:
         """用 CPU 上的 libx264 编码 H.264；奇数边长补一个黑像素以兼容 yuv420p。"""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._container = av.open(
             str(self.temporary), "w", format="mp4", options={"movflags": "+faststart"}
         )
@@ -116,12 +125,14 @@ class InferenceVideoWriter:
             self.temporary.unlink(missing_ok=True)
 
 
-def validate_inference_video(root: Path, records: Sequence[FrameRecord], end: float) -> None:
+def validate_inference_video(
+    root: Path, records: Sequence[FrameRecord], end: float, filename: str = INFERENCE_VIDEO
+) -> None:
     """流式解码可选视频，核对帧数、尺寸、相对时间戳和结束时长。"""
     if not records:
         raise ValueError("Inference video requires frame records")
     count = 0
-    with av.open(str(root / INFERENCE_VIDEO)) as container:
+    with av.open(str(root / filename)) as container:
         stream = container.streams.video[0]
         stream.codec_context.thread_count = 4
         if stream.duration is None or stream.time_base is None:

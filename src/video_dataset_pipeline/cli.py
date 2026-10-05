@@ -25,14 +25,23 @@ def main() -> None:
     download.add_argument("--task", choices=("detect", "pose"), default="detect")
     run = subcommands.add_parser("run", help="Sample, label, export and validate")
     run.add_argument("--config", required=True)
-    for field in ("input", "output", "model", "model-yaml"):
+    for field in ("output", "model", "model-yaml"):
         run.add_argument(f"--{field}")
+    run.add_argument(
+        "--input", action="append", help="Video file or directory; repeat to replace YAML inputs"
+    )
+    run.add_argument(
+        "--recursive",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Include videos in subdirectories",
+    )
     run.add_argument("--device", type=parse_device, help="GPU index (e.g. 4) or cpu")
     run.add_argument(
         "--save-video",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Infer and save every source frame to inference.mp4; disables sampling",
+        help="Infer and save every source frame of each video; disables sampling",
     )
     for field in (
         "sample-fps",

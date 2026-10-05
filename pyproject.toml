@@ -5,11 +5,14 @@ description = "Reproducible video pseudo-labeling for YOLO detection datasets"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "av>=14,<17",
-  "huggingface-hub>=0.34,<1",
   "ultralytics>=8.3,<9",
   "torch==2.7.1",
   "torchvision==0.22.1",
   "PyYAML>=6,<7",
+  "albumentations==2.0.8",
+  "opencv-python>=4.12,<5",
+  "opencv-python-headless>=4.12,<5",
+  "numpy>=2,<2.3",
 ]
 
 [project.scripts]

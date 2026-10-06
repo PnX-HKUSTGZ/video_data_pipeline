@@ -25,9 +25,12 @@ output: datasets/generated/rm26_exchange_pose/recvlnoyv3arV6
 confidence: 0.5
 keypoint_confidence: 0.5
 sample_fps: 2.0
+batch_size: 8
 device: 4
 save_video: false
 ```
+
+`batch_size` 默认 1，示例显式设为 8；可用 `--batch-size` 覆盖，详见 [批量推理与实测](batch-inference.md)。
 
 输入沿用原视频。启动时从权重读取任务类型，不需要另设 `task`；YAML 的 `names` 和 `kpt_shape` 必须与权重一致，显式提供的 `task` 也必须一致。`keypoint_confidence` 范围为 `[0,1]`，可用 `--keypoint-confidence` 覆盖。修改配置后用新的 `--output` 目录生成；不支持 resume。
 

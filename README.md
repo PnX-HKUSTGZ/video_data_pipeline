@@ -67,6 +67,8 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
 
 未启用视频保存时，默认 2 FPS 抽帧；置信度阈值 0.5，IoU 阈值 0.7，推理尺寸 640，FP32，保存原始分辨率 JPEG（质量 95）。采用 PTS 顺序抽帧，不通过帧号猜测时间；例如 25 FPS 视频中的 0.5 秒采样点会落到 0.52 秒帧。模型负责 letterbox 与原图坐标映射，额外进行类别内 NMS，使 YOLO26 end-to-end 检测头也遵守配置的 IoU 阈值。
 
+`batch_size` 控制每次推理的帧数，默认 `1`；可在 YAML 设置 `batch_size: 8`，或通过 `--batch-size 8` 覆盖。每批来自同一个视频，末批不足时直接处理，按原帧顺序导出；开启视频保存时也不会抽帧。检测和 pose 均支持，详见 [批量推理与实测](docs/batch-inference.md)。
+
 配置中用 `device: 4` 选择 `nvidia-smi` 显示的 GPU4，也可以写 `device: cpu`。命令行通过 `--device 4` 或 `--device cpu` 覆盖。默认配置使用 GPU4；视频在 CPU 解码，不创建显示窗口或 GPU 渲染上下文。
 
 `save_video` 默认是 `false`。设为 `true` 或添加 `--save-video` 后，**禁止抽帧，逐帧推理并保存** `[start, end)` 区间内的全部源视频帧，单视频在数据集根目录生成 `inference.mp4`，多视频分别保存到 `inference_videos/`。此时忽略 `sample_fps`；不允许同时设置 `smoke_frames > 0`，短片段测试请使用 `start/end`。`--no-save-video` 可覆盖配置将其关闭，恢复按配置抽帧。

@@ -54,7 +54,7 @@ uv run --locked video-dataset run --config configs/rm26_exchange_pose.yaml \
 - `start/end` 分别作用于每段视频，以该视频起始时间为零点，范围为 `[start,end)`；实际结束时间不超过视频时长。空区间报错。
 - `smoke_frames` 是每段视频的抽检数量。开启视频保存时禁止抽帧，忽略 `sample_fps`，也不能设置正数 `smoke_frames`。
 
-逐帧流式解码，不保留整段视频图像。每个视频完成后导出并清理它的暂存图片，只保留最终图片、预览、帧记录及可选推理视频。
+逐帧流式解码，不保留整段视频图像。每个视频完成后导出并清理它的暂存图片，只保留最终图片、预览、帧记录及可选推理视频。`batch_size` 可控制单次推理帧数（默认 1），批次不跨视频；见 [批量推理说明](batch-inference.md)。
 
 ## 筛选与划分
 

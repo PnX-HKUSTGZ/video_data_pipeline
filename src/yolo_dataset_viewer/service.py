@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import yaml
 from PIL import Image, ImageOps, UnidentifiedImageError
+from pydantic import BaseModel
 
 from .dataset import Cancelled, Dataset, DatasetError, Sample, build_index, file_stamp
 from .edit_models import DraftStatus, EditRequest
@@ -29,13 +30,39 @@ from .exports import (
     recovery_request,
 )
 from .labels import read_labels
-from .models import IndexStatus, Issue, LabelState, OpenRequest, SampleDetail, SamplePage, Stats
+from .models import (
+    IndexStatus,
+    Issue,
+    LabelState,
+    OpenRequest,
+    SampleDetail,
+    SampleInfo,
+    SamplePage,
+    Stats,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class SessionError(ValueError):
     """The requested dataset was replaced, is not ready, or changed on disk."""
+
+
+class BrowserView(BaseModel):
+    """One coherent browser snapshot replaces three separately versioned requests."""
+
+    page: SamplePage
+    stats: Stats
+    draft: DraftStatus | None
+
+
+ImageKey = tuple[str, int, tuple[int, int] | None]
+SelectionKey = tuple[str, int, str | None, int | None, LabelState | None, str, str | None]
+
+
+def image_version(stamp: tuple[int, int] | None) -> str:
+    """Opaque content stamp for application caches; sessions isolate sample identities."""
+    return f"{stamp[0]:x}-{stamp[1]:x}" if stamp else "missing"
 
 
 class ViewerService:
@@ -57,7 +84,10 @@ class ViewerService:
         self._export_session: str | None = None
         self._export_cancel = Event()
         self._export_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo-export")
-        self._cache: OrderedDict[tuple[str, int, tuple[int, int] | None], bytes] = OrderedDict()
+        self._cache: OrderedDict[tuple[ImageKey, bool], bytes] = OrderedDict()
+        self._image_meta: OrderedDict[ImageKey, tuple[int, int]] = OrderedDict()
+        self._image_locks = [Lock() for _ in range(32)]
+        self._selection_cache: tuple[SelectionKey, list[SampleInfo], Stats] | None = None
         self._cache_size = 0
         self._cache_limit = cache_bytes
 
@@ -87,6 +117,8 @@ class ViewerService:
             self._request = request.model_copy(deep=True)
             self._recovery_root = None
             self._cache.clear()
+            self._image_meta.clear()
+            self._selection_cache = None
             self._cache_size = 0
             self._status = IndexStatus(
                 id=uuid4().hex,
@@ -229,6 +261,10 @@ class ViewerService:
             with self._lock:
                 editor.close()
                 self._dataset, self._editor = dataset, replacement
+                self._selection_cache = None
+                self._cache.clear()
+                self._image_meta.clear()
+                self._cache_size = 0
                 if self._status:
                     self._status.id = uuid4().hex
                     result.session_id = self._status.id
@@ -236,6 +272,53 @@ class ViewerService:
                     self._status.splits = list(dataset.spec.sources)
                     self._status.scanned = self._status.total = len(dataset.samples)
             return result
+
+    def _selection(
+        self,
+        session_id: str,
+        split: str | None,
+        class_id: int | None,
+        state: LabelState | None,
+        search: str,
+        edit_state: str | None,
+    ) -> tuple[list[SampleInfo], Stats]:
+        """Keep one filtered metadata selection per revision; geometry remains on demand."""
+        dataset = self.dataset(session_id)
+        editor = self._editor
+        revision = editor.sync() if editor else 0
+        key = (session_id, revision, split, class_id, state, search, edit_state)
+        if self._selection_cache is not None and self._selection_cache[0] == key:
+            return self._selection_cache[1:]
+        if editor:
+            selected = editor.selected(split, class_id, state, search, edit_state, refresh=False)
+            stats = editor.stats(selected)
+        else:
+            samples = dataset.select(split, class_id, state, search)
+            selected = [sample.info() for sample in samples]
+            stats = dataset.stats(samples)
+        self._selection_cache = (key, selected, stats)
+        return selected, stats
+
+    def _page(
+        self, selected: list[SampleInfo], revision: int, offset: int, limit: int
+    ) -> SamplePage:
+        dataset = self._dataset
+        if dataset is None:
+            raise SessionError("数据集尚未完成索引")
+        return SamplePage(
+            revision=revision,
+            items=[
+                info.model_copy(
+                    update={
+                        "image_version": image_version(file_stamp(dataset.samples[info.id].image))
+                    }
+                )
+                for info in selected[offset : offset + limit]
+            ],
+            total=len(selected),
+            offset=offset,
+            limit=limit,
+        )
 
     def page(
         self,
@@ -250,21 +333,10 @@ class ViewerService:
     ) -> SamplePage:
         """Read metadata from one effective draft revision, without loading images."""
         with self._edit_lock:
-            dataset = self.dataset(session_id)
-            if self._editor:
-                editor = self._editor
-                selected = editor.selected(split, class_id, state, search, edit_state)
-                revision = editor.revision
-            else:
-                selected = [s.info() for s in dataset.select(split, class_id, state, search)]
-                revision = 0
-            return SamplePage(
-                revision=revision,
-                items=selected[offset : offset + limit],
-                total=len(selected),
-                offset=offset,
-                limit=limit,
+            selected, stats = self._selection(
+                session_id, split, class_id, state, search, edit_state
             )
+            return self._page(selected, stats.revision, offset, limit)
 
     def stats(
         self,
@@ -276,12 +348,30 @@ class ViewerService:
         edit_state: str | None = None,
     ) -> Stats:
         with self._edit_lock:
-            dataset = self.dataset(session_id)
-            if self._editor:
-                editor = self._editor
-                result = editor.stats(editor.selected(split, class_id, state, search, edit_state))
-                return result
-            return dataset.stats(dataset.select(split, class_id, state, search))
+            return self._selection(session_id, split, class_id, state, search, edit_state)[1]
+
+    def view(
+        self,
+        session_id: str,
+        split: str | None,
+        class_id: int | None,
+        state: LabelState | None,
+        search: str,
+        offset: int,
+        limit: int,
+        edit_state: str | None = None,
+    ) -> BrowserView:
+        """Return gallery, counts and draft from the same in-memory revision."""
+        with self._edit_lock:
+            selected, stats = self._selection(
+                session_id, split, class_id, state, search, edit_state
+            )
+            draft = (
+                self._editor.status(refresh=False, cached_conflicts=True) if self._editor else None
+            )
+            return BrowserView(
+                page=self._page(selected, stats.revision, offset, limit), stats=stats, draft=draft
+            )
 
     def detail(self, session_id: str, sample_id: int) -> SampleDetail:
         with self._edit_lock:
@@ -289,7 +379,7 @@ class ViewerService:
 
     def _detail(self, session_id: str, sample_id: int) -> SampleDetail:
         dataset, sample = self.sample(session_id, sample_id)
-        revision = self._editor.status().revision if self._editor else 0
+        revision = self._editor.sync() if self._editor else 0
         if file_stamp(sample.label) != sample.label_stamp:
             raise SessionError("标签文件已变化，请重新扫描数据集以更新统计")
         labels = (
@@ -303,19 +393,27 @@ class ViewerService:
         width: int | None = None
         height: int | None = None
         image_error: str | None = None
+        stamp = file_stamp(sample.image)
         try:
             self._check_image_path(sample)
-            with self._decoders, Image.open(sample.image) as source:
-                width, height = source.size
-                if source.getexif().get(274, 1) in (5, 6, 7, 8):
-                    width, height = height, width
-                # Decode only this sample; truncated files become per-image diagnostics.
-                source.load()
+            key = (session_id, sample_id, stamp)
+            with self._lock:
+                dimensions = self._image_meta.get(key)
+                if dimensions is not None:
+                    self._image_meta.move_to_end(key)
+            if dimensions is None:
+                # The imminent image request shares this bounded encoded result and decode.
+                self.image(session_id, sample_id, False, image_version(stamp))
+                with self._lock:
+                    dimensions = self._image_meta.get(key)
+            if dimensions is not None:
+                width, height = dimensions
         except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as error:
             image_error = f"图片无法读取：{error}"
             labels.issues.append(Issue(file=str(sample.image), message=image_error))
         return SampleDetail(
-            **info.model_dump(),
+            **info.model_dump(exclude={"image_version"}),
+            image_version=image_version(stamp),
             revision=revision,
             label_path=str(sample.label),
             width=width,
@@ -330,39 +428,53 @@ class ViewerService:
         if sample.image.resolve() != sample.image:
             raise ValueError("图片链接目标已变化，请重新扫描")
 
-    def image(self, session_id: str, sample_id: int, thumbnail: bool) -> bytes:
+    def image(
+        self, session_id: str, sample_id: int, thumbnail: bool, version: str | None = None
+    ) -> bytes:
+        """Share concurrent decodes and bound both thumbnail and full JPEG payloads."""
         _, sample = self.sample(session_id, sample_id)
         self._check_image_path(sample)
-        key = (session_id, sample_id, file_stamp(sample.image))
-        if thumbnail:
+        stamp = file_stamp(sample.image)
+        if version is not None and version != image_version(stamp):
+            raise SessionError("图片版本已变化，请刷新详情")
+        key = (session_id, sample_id, stamp)
+        cache_key = (key, thumbnail)
+        # Fixed stripes bound lock memory and coalesce detail/prefetch requests for one image.
+        with self._image_locks[sample_id % len(self._image_locks)]:
             with self._lock:
-                cached = self._cache.get(key)
+                cached = self._cache.get(cache_key)
                 if cached is not None:
-                    self._cache.move_to_end(key)
+                    self._cache.move_to_end(cache_key)
                     return cached
-        with self._decoders, Image.open(sample.image) as source:
-            # Both resolutions use the same EXIF-corrected coordinate frame.
-            oriented = ImageOps.exif_transpose(source)
-            try:
-                if thumbnail:
-                    oriented.thumbnail((360, 240))
-                with oriented.convert("RGB") as rgb:
-                    output = BytesIO()
-                    rgb.save(output, format="JPEG", quality=82 if thumbnail else 95)
-                    data = output.getvalue()
-            finally:
-                oriented.close()
-        if thumbnail and len(data) <= self._cache_limit:
+            with self._decoders, Image.open(sample.image) as source:
+                oriented = ImageOps.exif_transpose(source)
+                try:
+                    dimensions = oriented.size
+                    if thumbnail:
+                        oriented.thumbnail((360, 240))
+                    with oriented.convert("RGB") as rgb:
+                        output = BytesIO()
+                        rgb.save(output, format="JPEG", quality=82 if thumbnail else 95)
+                        data = output.getvalue()
+                finally:
+                    oriented.close()
+            if file_stamp(sample.image) != stamp:
+                raise SessionError("图片在读取时变化，请刷新详情")
             with self._lock:
                 if self._status and self._status.id == session_id:
-                    previous = self._cache.pop(key, None)
-                    self._cache_size -= len(previous) if previous else 0
-                    self._cache[key] = data
-                    self._cache_size += len(data)
-                    while self._cache_size > self._cache_limit:
-                        _, evicted = self._cache.popitem(last=False)
-                        self._cache_size -= len(evicted)
-        return data
+                    self._image_meta[key] = dimensions
+                    self._image_meta.move_to_end(key)
+                    while len(self._image_meta) > 512:
+                        self._image_meta.popitem(last=False)
+                    if len(data) <= self._cache_limit:
+                        previous = self._cache.pop(cache_key, None)
+                        self._cache_size -= len(previous) if previous else 0
+                        self._cache[cache_key] = data
+                        self._cache_size += len(data)
+                        while self._cache_size > self._cache_limit:
+                            _, evicted = self._cache.popitem(last=False)
+                            self._cache_size -= len(evicted)
+            return data
 
     def preview_export(self, session_id: str, body: ExportRequest) -> ExportPreview:
         self._ensure_not_exporting()
@@ -472,6 +584,8 @@ class ViewerService:
             self._dataset, self._editor, self._request = dataset, editor, request
             self._recovery_root = dataset.spec.root
             self._cache.clear()
+            self._image_meta.clear()
+            self._selection_cache = None
             self._cache_size = 0
             self._status.names = dataset.names
             self._status.task = request.task
@@ -512,4 +626,6 @@ class ViewerService:
                 self._editor.close()
             self._editor = None
             self._cache.clear()
+            self._image_meta.clear()
+            self._selection_cache = None
             self._cache_size = 0

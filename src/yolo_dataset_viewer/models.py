@@ -76,6 +76,7 @@ class Labels(BaseModel):
 
 
 class SampleInfo(BaseModel):
+    image_version: str = ""
     id: int
     key: str = ""
     modified: bool = False

@@ -16,7 +16,7 @@ from .edit_models import DraftStatus, EditRequest, RevisionRequest
 from .editing import DraftError
 from .exports import ExportPreview, ExportRequest, ExportStatus, RecoveryInfo
 from .models import IndexStatus, LabelState, OpenRequest, SampleDetail, SamplePage, Stats
-from .service import SessionError, ViewerService
+from .service import BrowserView, SessionError, ViewerService
 
 
 def create_app() -> FastAPI:
@@ -73,6 +73,19 @@ def create_app() -> FastAPI:
     @app.get("/api/datasets/{session_id}", response_model=IndexStatus)
     def status(session_id: str) -> IndexStatus:
         return service.status(session_id)
+
+    @app.get("/api/datasets/{session_id}/view", response_model=BrowserView)
+    def view(
+        session_id: str,
+        split: str | None = None,
+        class_id: int | None = None,
+        state: LabelState | None = None,
+        search: str = "",
+        offset: int = Query(0, ge=0),
+        limit: int = Query(48, ge=1, le=200),
+        edit_state: Literal["modified", "deleted"] | None = None,
+    ) -> BrowserView:
+        return service.view(session_id, split, class_id, state, search, offset, limit, edit_state)
 
     @app.get("/api/datasets/{session_id}/samples", response_model=SamplePage)
     def samples(
@@ -139,9 +152,11 @@ def create_app() -> FastAPI:
         return service.detail(session_id, sample_id)
 
     @app.get("/api/datasets/{session_id}/samples/{sample_id}/image")
-    def image(session_id: str, sample_id: int, thumbnail: bool = False) -> Response:
+    def image(
+        session_id: str, sample_id: int, thumbnail: bool = False, version: str | None = None
+    ) -> Response:
         try:
-            data = service.image(session_id, sample_id, thumbnail)
+            data = service.image(session_id, sample_id, thumbnail, version)
         except (OSError, ValueError, Image.DecompressionBombError) as error:
             if isinstance(error, SessionError):
                 raise

@@ -3,13 +3,15 @@
 // Edits are serialized and acknowledged only after the SQLite transaction commits.
 const editor = {draft: null, enabled: false, queue: [], saving: null, failure: null,
   tool: "browse", space: false, gesture: null, pointIndex: 0, preview: null, exporting: false,
-  exportResult: null, classStats: [], repairLine: null};
+  exportResult: null, classStats: [], repairLine: null, optionSchema: null, selectionSchema: null, reloadController: null};
 
 function editorError(error, target = "editor-error") {
   const text = error ? error.message || String(error) : "";
   $(target).textContent = text; $(target).hidden = !text;
 }
 function editorReset() {
+  editor.reloadController?.abort(); editor.reloadController = null;
+  editor.optionSchema = null; editor.selectionSchema = null;
   editor.draft = null; editor.enabled = false; editor.tool = "browse"; editor.gesture = null; editor.repairLine = null;
   $("draft-bar").hidden = true; $("edit-filter").hidden = true; $("edit-filter").value = "";
   $("edit-toolbar").hidden = true; $("object-editor").hidden = true;
@@ -28,15 +30,23 @@ function editorRenderStatus() {
   const d = editor.draft;
   const busy = !!editor.saving || !!editor.queue.length || !!editor.gesture && editor.gesture.kind !== "pan";
   const blocked = busy || editor.exporting;
-  document.querySelectorAll("#object-editor input, #object-editor select, #object-editor button, [data-tool], #new-object-class, #image-delete, .class-editor input, .class-editor button, #class-add-form input, #class-add-form button, .issue-list button").forEach((node) => { node.disabled = blocked || node.dataset.edgeDisabled === "true"; });
-  state.names = Object.fromEntries(d.classes.map((c) => [c.id, c.name]));
-  const selected = $("class-filter").value;
-  $("class-filter").replaceChildren(new Option("全部类别", ""), ...d.classes.map((c) => new Option(`${c.id} · ${c.name}`, c.id)));
-  if (d.classes.some((c) => String(c.id) === selected)) $("class-filter").value = selected;
-  for (const id of ["new-object-class", "object-class"]) {
-    const previous = $(id).value;
-    $(id).replaceChildren(...d.classes.map((c) => new Option(c.name, c.id)));
-    if (d.classes.some((c) => String(c.id) === previous)) $(id).value = previous;
+  document.querySelectorAll("#object-editor input, #object-editor select, #object-editor button, [data-tool], #new-object-class, #image-delete, .class-editor input, .class-editor button, #class-add-form input, #class-add-form button, .issue-list button").forEach((node) => {
+    const disabled = blocked || node.dataset.edgeDisabled === "true";
+    if (node.disabled !== disabled) node.disabled = disabled;
+  });
+  // Saving geometry does not change class choices; keep the existing DOM and focus.
+  const optionSchema = JSON.stringify(d.classes.map((c) => [c.id, c.name]));
+  if (optionSchema !== editor.optionSchema) {
+    editor.optionSchema = optionSchema;
+    state.names = Object.fromEntries(d.classes.map((c) => [c.id, c.name]));
+    const selected = $("class-filter").value;
+    $("class-filter").replaceChildren(new Option("全部类别", ""), ...d.classes.map((c) => new Option(`${c.id} · ${c.name}`, c.id)));
+    if (d.classes.some((c) => String(c.id) === selected)) $("class-filter").value = selected;
+    for (const id of ["new-object-class", "object-class"]) {
+      const previous = $(id).value;
+      $(id).replaceChildren(...d.classes.map((c) => new Option(c.name, c.id)));
+      if (d.classes.some((c) => String(c.id) === previous)) $(id).value = previous;
+    }
   }
   $("draft-summary").textContent = `修订 ${d.revision} · ${d.modified_images} 张修改 · ${d.deleted_images} 张删除`;
   const saveText = editor.failure ? "保存失败，待保存操作已保留" : busy ? "保存中…" : d.dirty ? "已保存到草稿" : "无待应用改动";
@@ -54,6 +64,7 @@ function editorRenderStatus() {
 }
 async function editorBeforeNavigation() {
   if (editor.exporting) { notice("导出正在进行，请等待完成后切换数据。"); return false; }
+  if (editor.saving) await editor.saving;
   if (editor.queue.length) await editorDrain();
   if (editor.failure || editor.queue.length) {
     editorError("还有保存失败的操作，请重试保存，或读取最新草稿后继续。");
@@ -66,6 +77,7 @@ function editorWritable() {
   if (editor.saving || editor.queue.length) {
     editorError("正在保存上一项修改，请稍候。"); return false;
   }
+  if ($("image-dialog").open && !view.image) return false;
   if ($("image-dialog").open && state.detail && state.detail.revision !== editor.draft.revision) {
     editorError("标注已有更新，正在读取最新版本，请检查后再编辑。"); editorReloadDetail(); return false;
   }
@@ -103,6 +115,7 @@ async function editorDrain() {
         if (item.operation) body.operation = item.operation;
         editor.draft = await api(`${base()}/draft/${item.path}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
         if (editor.draft.session_id && editor.draft.session_id !== state.session) {
+          loading.reset();
           state.session = editor.draft.session_id;
           localStorage.setItem("yolo-viewer-session", JSON.stringify({id:state.session,request:state.request}));
           if ($("image-dialog").open) $("image-dialog").close();
@@ -117,7 +130,7 @@ async function editorDrain() {
     }
     editorRenderStatus();
     if (!editor.failure) {
-      await refresh(); await editorReloadDetail();
+      await Promise.all([refresh(), editorReloadDetail()]);
       if ($("classes-dialog").open) await renderClassManager();
     }
     } while (editor.queue.length && !editor.failure);
@@ -125,28 +138,52 @@ async function editorDrain() {
   })();
   try { return await editor.saving; } finally { editor.saving = null; editorRenderStatus(); }
 }
-async function editorFetchDetail(endpoint, sampleId) {
+async function editorFetchDetail(endpoint, sampleId, {signal} = {}) {
+  const version = state.detailVersion;
+  const ensureCurrent = () => {
+    if (signal?.aborted || endpoint !== base() || version !== state.detailVersion) {
+      throw new DOMException("标注请求已被更新的浏览操作替代", "AbortError");
+    }
+  };
   for (let attempt = 0; attempt < 5; attempt++) {
-    const detail = await api(`${endpoint}/samples/${sampleId}`);
+    ensureCurrent();
+    const detail = await api(`${endpoint}/samples/${sampleId}`, {signal});
+    ensureCurrent();
     if (!editor.enabled || detail.revision === editor.draft?.revision) return detail;
-    const draft = await api(`${endpoint}/draft`);
-    if (detail.revision !== draft.revision) continue;
+    const draft = await api(`${endpoint}/draft`, {signal});
+    ensureCurrent();
+    if (detail.revision !== draft.revision || draft.revision < (editor.draft?.revision ?? 0)) continue;
     editor.draft = draft; editorRenderStatus(); return detail;
   }
   throw new Error("图片标注正在被另一页面修改，请重新打开。");
 }
 async function editorReloadDetail() {
   if (!state.detail || !$("image-dialog").open) return;
-  const id = state.detail.id, uid = state.detail.annotations[view.selected]?.uid;
+  editor.reloadController?.abort();
+  const controller = new AbortController(); editor.reloadController = controller;
+  const id = state.detail.id, key = state.detail.key, endpoint = base(), version = state.detailVersion;
+  const imageVersion = state.detail.image_version;
+  const uid = state.detail.annotations[view.selected]?.uid;
   try {
-    const detail = await editorFetchDetail(base(), id);
-    if (state.detail?.id !== id) return;
+    const detail = await editorFetchDetail(endpoint, id, {signal: controller.signal});
+    if (controller.signal.aborted || version !== state.detailVersion || endpoint !== base() || state.detail?.id !== id || state.detail.key !== key) return;
+    if (imageVersion !== detail.image_version) {
+      // The source image changed. Release stale pixels before restoring editable geometry.
+      view.image = null; draw();
+      const position = state.position;
+      Promise.resolve(editor.saving).then(() => {
+        if (version === state.detailVersion && endpoint === base() && $("image-dialog").open) return showAt(position);
+      }).catch(report);
+      return;
+    }
     state.detail = detail; renderDetail(detail);
     const next = detail.annotations.findIndex((a) => a.uid === uid);
     selectAnnotation(next >= 0 ? next : Math.min(view.selected, detail.annotations.length - 1));
     editorRenderStatus();
-  } catch (error) { editorError(error); }
+  } catch (error) { if (error.name !== "AbortError") editorError(error); }
+  finally { if (editor.reloadController === controller) editor.reloadController = null; }
 }
+
 function editorDetail(detail) {
   $("edit-toolbar").hidden = !editor.enabled;
   $("object-editor").hidden = true; editorError("");
@@ -185,12 +222,18 @@ function editorSetTool(tool) {
 }
 function editorSelection() {
   const a = state.detail?.annotations[view.selected];
-  $("selected-annotation").before($("object-editor"));
+  if ($("object-editor").nextElementSibling !== $("selected-annotation")) $("selected-annotation").before($("object-editor"));
   $("object-editor").hidden = !editor.enabled || !a || state.detail.deleted;
-  if (!editor.enabled || !a) return;
+  if (!editor.enabled || !a) { editor.selectionSchema = null; return; }
+  const definitions = editor.draft.classes.find((c) => c.id === a.class_id)?.keypoints || [];
+  const selectionSchema = JSON.stringify([state.session, state.detail.id, a.uid, a.class_id, a.box, a.keypoints, definitions]);
+  if (selectionSchema === editor.selectionSchema) {
+    $("point-editor").querySelectorAll(".point-select").forEach((node, index) => node.classList.toggle("active", editor.pointIndex === index));
+    return;
+  }
+  editor.selectionSchema = selectionSchema;
   $("object-class").value = String(a.class_id);
   for (const key of ["cx", "cy", "width", "height"]) $("box-" + key).value = Number(a.box[key].toFixed(8));
-  const definitions = editor.draft.classes.find((c) => c.id === a.class_id)?.keypoints || [];
   $("point-editor").replaceChildren();
   if (!definitions.length) { $("point-editor").append(element("p", "field-hint", "此类别尚无关键点。可在类别与关键点面板中新增。")); return; }
   $("point-editor").append(element("h3", "", "关键点 · 选点后在画布放置或拖动"));
@@ -467,7 +510,7 @@ $("save-retry").addEventListener("click", () => { editor.failure = null; editorD
 $("draft-reload").addEventListener("click", async () => {
   if (editor.queue.length && !confirm("读取最新草稿将放弃本页尚未保存的操作；已保存操作保持不变。继续？")) return;
   try {
-    editor.queue = []; editor.failure = null;
+    editor.queue = []; editor.failure = null; editor.selectionSchema = null;
     try { editor.draft = await api(`${base()}/draft`); }
     catch {
       const previous = JSON.parse(localStorage.getItem("yolo-viewer-session") || "null");

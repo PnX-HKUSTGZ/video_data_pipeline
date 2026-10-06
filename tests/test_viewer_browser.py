@@ -110,21 +110,29 @@ def test_render_inspect_zoom_pan_and_annotations(page, tmp_path, task):
     canvas.click()
     expect(page.locator("#selected-annotation")).to_be_visible()
     expect(page.locator("#raw-label")).to_contain_text("0 ")
-    before = canvas.evaluate("el => el.toDataURL()")
+    before = canvas.evaluate(
+        "async el => { await new Promise(requestAnimationFrame); return el.toDataURL(); }"
+    )
     page.locator("#show-annotations").uncheck()
-    after = canvas.evaluate("el => el.toDataURL()")
+    after = canvas.evaluate(
+        "async el => { await new Promise(requestAnimationFrame); return el.toDataURL(); }"
+    )
     assert before != after
     page.locator("#show-annotations").check()
     zoom = page.locator("#zoom-level").inner_text()
     page.locator("#zoom-in").click()
     expect(page.locator("#zoom-level")).not_to_have_text(zoom)
     box = canvas.bounding_box()
-    before = canvas.evaluate("el => el.toDataURL()")
+    before = canvas.evaluate(
+        "async el => { await new Promise(requestAnimationFrame); return el.toDataURL(); }"
+    )
     page.mouse.move(box["x"] + 100, box["y"] + 100)
     page.mouse.down()
     page.mouse.move(box["x"] + 160, box["y"] + 140, steps=4)
     page.mouse.up()
-    assert before != canvas.evaluate("el => el.toDataURL()")
+    assert before != canvas.evaluate(
+        "async el => { await new Promise(requestAnimationFrame); return el.toDataURL(); }"
+    )
     page.locator("#fit-image").click()
     page.locator("#image-next").click()
     expect(page.locator("#detail-title")).to_contain_text("sample_001")

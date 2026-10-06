@@ -10,6 +10,14 @@ const state = {session: null, names: {}, offset: 0, limit: 48, total: 0, items: 
 const canvas = $("image-canvas");
 const ctx = canvas.getContext("2d");
 const view = {image: null, scale: 1, x: 0, y: 0, selected: -1, width: 0, height: 0};
+const thumbnails = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    const img = entry.target;
+    if (img.dataset.src) img.src = img.dataset.src;
+    thumbnails.unobserve(img);
+  }
+}, {rootMargin: "320px"});
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -45,6 +53,7 @@ function enableFilters(enabled) {
 }
 
 function resetGallery() {
+  thumbnails.disconnect();
   state.items = []; state.offset = 0; state.total = 0;
   $("gallery").replaceChildren(); $("pagination").hidden = true;
   $("empty-state").hidden = false;
@@ -57,7 +66,7 @@ function resetGallery() {
 
 async function openDataset(request, force = false) {
   if (!(await editorBeforeNavigation())) return;
-  editorReset();
+  loading.reset(); editorReset();
   const version = ++state.openVersion;
   ++state.viewVersion; ++state.detailVersion;
   if ($("image-dialog").open) $("image-dialog").close();
@@ -146,41 +155,76 @@ function renderStats(stats) {
   }));
 }
 
+// Preserve decoded thumbnails and focus when edits change only counters or labels.
+function renderGallery(items, endpoint) {
+  const gallery = $("gallery"), existing = new Map([...gallery.children].map((node) => [node.dataset.sampleKey, node]));
+  const retained = new Set();
+  items.forEach((sample, index) => {
+    const key = `${endpoint}:${sample.id}:${sample.key || ""}`;
+    let card = existing.get(key);
+    if (!card) {
+      card = element("button", "sample-card"); card.dataset.sampleKey = key;
+      const wrap = element("div", "thumb-wrap"), img = element("img");
+      img.loading = "lazy"; img.decoding = "async";
+      img.addEventListener("error", () => {
+        img.hidden = true;
+        if (!wrap.querySelector(".issue")) wrap.append(element("span", "issue", "图片无法读取"));
+      });
+      wrap.append(img, element("span", "edit-tag"), element("span", "thumb-tag"));
+      const meta = element("div", "card-meta"), subtitle = element("div", "card-subtitle");
+      subtitle.append(element("span", "sample-split"), element("span", "sample-number"));
+      meta.append(element("span", "card-name"), subtitle); card.append(wrap, meta);
+      card.addEventListener("click", () => showAt(Number(card.dataset.position)).catch(report));
+    }
+    retained.add(card); card.dataset.position = state.offset + index;
+    card.className = `sample-card ${sample.state}`; card.title = sample.path;
+    card.setAttribute("aria-label", `查看 ${sample.path}`);
+    const img = card.querySelector("img"), src = `${endpoint}/samples/${sample.id}/image?thumbnail=true`;
+    if (img.dataset.src !== src || img.dataset.version !== (sample.image_version || "")) {
+      img.dataset.version = sample.image_version || "";
+      img.dataset.src = src;
+      img.hidden = false; card.querySelector(".issue")?.remove();
+      thumbnails.observe(img);
+    }
+    img.alt = sample.path;
+    const editTag = card.querySelector(".edit-tag"); editTag.hidden = !sample.modified && !sample.deleted;
+    editTag.textContent = sample.deleted ? "已删除" : "已修改";
+    card.querySelector(".thumb-tag").textContent = sample.state === "valid" ? `${sample.instances} 个目标` : labels[sample.state];
+    card.querySelector(".card-name").textContent = sample.path.split("/").pop();
+    card.querySelector(".sample-split").textContent = sample.split;
+    card.querySelector(".sample-number").textContent = `#${sample.id + 1}`;
+    if (gallery.children[index] !== card) gallery.insertBefore(card, gallery.children[index] || null);
+  });
+  for (const card of [...gallery.children]) if (!retained.has(card)) {
+    thumbnails.unobserve(card.querySelector("img")); card.remove();
+  }
+}
+
 async function refresh() {
   if (!state.session) return;
   const version = ++state.viewVersion, endpoint = base();
+  loading.refreshAbort?.abort(); loading.stopNeighbors();
+  const controller = new AbortController(); loading.refreshAbort = controller;
+  $("gallery").setAttribute("aria-busy", "true");
   try {
     let page, stats, consistent = false;
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       const query = filters(), pageQuery = new URLSearchParams(query);
       pageQuery.set("offset", state.offset); pageQuery.set("limit", state.limit);
-      const replies = await Promise.all([api(`${endpoint}/samples?${pageQuery}`), api(`${endpoint}/stats?${query}`), editor.enabled ? api(`${endpoint}/draft`) : Promise.resolve(null)]);
-      if (version !== state.viewVersion) return;
-      [page, stats] = replies;
-      const draft = replies[2];
-      if (page.revision !== stats.revision || draft && draft.revision !== page.revision) continue;
-      if (draft) { editor.draft = draft; editorRenderStatus(); }
+      const reply = await api(`${endpoint}/view?${pageQuery}`, {signal: controller.signal});
+      if (version !== state.viewVersion || endpoint !== base()) return;
+      ({page, stats} = reply);
+      if (reply.draft && editor.draft && reply.draft.revision < editor.draft.revision) continue;
+      if (reply.draft) { editor.draft = reply.draft; editorRenderStatus(); }
       if (query.toString() !== filters().toString()) continue;
+      if (page.total && state.offset >= page.total) {
+        state.offset = Math.floor((page.total - 1) / state.limit) * state.limit; continue;
+      }
       consistent = true; break;
     }
-    if (!consistent) throw new Error("草稿正在被另一页面连续修改，请稍后刷新。");
-    if (version !== state.viewVersion) return;
+    if (!consistent) throw new Error("筛选条件已变化，请重试。");
     state.items = page.items; state.total = page.total;
-    $("gallery").replaceChildren(...page.items.map((sample, index) => {
-      const card = element("button", `sample-card ${sample.state}`);
-      card.title = sample.path; card.setAttribute("aria-label", `查看 ${sample.path}`);
-      const wrap = element("div", "thumb-wrap"), img = element("img");
-      img.loading = "lazy"; img.decoding = "async"; img.alt = sample.path;
-      img.src = `${endpoint}/samples/${sample.id}/image?thumbnail=true`;
-      img.addEventListener("error", () => { img.hidden = true; wrap.append(element("span", "issue", "图片无法读取")); });
-      if (sample.modified || sample.deleted) wrap.append(element("span", "edit-tag", sample.deleted ? "已删除" : "已修改"));
-      wrap.append(img, element("span", "thumb-tag", sample.state === "valid" ? `${sample.instances} 个目标` : labels[sample.state]));
-      const meta = element("div", "card-meta"); meta.append(element("span", "card-name", sample.path.split("/").pop()));
-      const subtitle = element("div", "card-subtitle"); subtitle.append(element("span", "", sample.split), element("span", "", `#${sample.id + 1}`));
-      meta.append(subtitle); card.append(wrap, meta);
-      card.addEventListener("click", () => showAt(state.offset + index).catch(report));
-      return card;
-    }));
+    renderGallery(page.items, endpoint);
     $("result-count").textContent = `${page.total.toLocaleString()} 张图片`;
     $("empty-state").hidden = page.total !== 0;
     $("empty-state").querySelector("h3").textContent = "没有匹配的图片";
@@ -190,17 +234,26 @@ async function refresh() {
     $("page-prev").disabled = state.offset === 0;
     $("page-next").disabled = state.offset + state.limit >= page.total;
     renderStats(stats);
-  } catch (error) { if (version === state.viewVersion) report(error); }
+  } catch (error) {
+    if (error.name !== "AbortError" && version === state.viewVersion) report(error);
+  } finally {
+    if (version === state.viewVersion) $("gallery").setAttribute("aria-busy", "false");
+  }
 }
 
 async function showAt(position) {
   if (!(await editorBeforeNavigation())) return;
   if (position < 0 || position >= state.total) return;
   const version = ++state.detailVersion, endpoint = base();
+  loading.detailAbort?.abort();
+  clearTimeout(loading.neighborTimer); loading.neighborAbort?.abort();
+  const controller = new AbortController(); loading.detailAbort = controller;
+  const current = () => version === state.detailVersion && endpoint === base() && !controller.signal.aborted;
   state.position = position; state.detail = null; view.image = null; view.selected = -1;
   if (!$("image-dialog").open) $("image-dialog").showModal();
   $("detail-title").textContent = "加载中…";
   $("annotation-list").replaceChildren(); $("selected-annotation").hidden = true;
+  $("object-editor").hidden = true;
   $("detail-meta").textContent = ""; $("detail-issues").replaceChildren();
   $("annotation-count").textContent = "0";
   $("image-prev").disabled = position === 0; $("image-next").disabled = position + 1 >= state.total;
@@ -210,19 +263,52 @@ async function showAt(position) {
     let sample = state.items[position - state.offset];
     if (!sample) {
       const query = filters(); query.set("offset", position); query.set("limit", 1);
-      sample = (await api(`${endpoint}/samples?${query}`)).items[0];
+      sample = (await api(`${endpoint}/samples?${query}`, {signal: controller.signal})).items[0];
     }
-    if (version !== state.detailVersion) return;
-    const detail = await editorFetchDetail(endpoint, sample.id);
-    if (version !== state.detailVersion) return;
-    state.detail = detail;
-    renderDetail(detail);
-    if (detail.image_error) { message(detail.image_error); return; }
-    const img = new Image();
-    img.onload = () => { if (version !== state.detailVersion) return; view.image = img; message(""); fit(); };
-    img.onerror = () => { if (version === state.detailVersion) message("图片无法解码，源文件可能已被移除或损坏"); };
-    img.src = `${endpoint}/samples/${sample.id}/image`;
-  } catch (error) { if (version === state.detailVersion) message(error.message); }
+    if (!current()) return;
+    if (!sample) throw new Error("筛选结果已变化，请刷新图片列表。");
+    // Start image transfer immediately; metadata still validates the current draft and file version.
+    const imageResult = loading.images.acquire(endpoint, sample).then((image) => ({image}), (error) => ({error}));
+    const detail = await editorFetchDetail(endpoint, sample.id, {signal: controller.signal});
+    if (!current()) return;
+    state.detail = detail; renderDetail(detail);
+    if (detail.image_error) { loading.images.cancelPending(); message(detail.image_error); return; }
+    let result;
+    if (detail.image_version !== sample.image_version || detail.key !== sample.key) {
+      result = {image: await loading.images.acquire(endpoint, detail)};
+    } else result = await imageResult;
+    if (!current()) return;
+    if (result.error) throw result.error;
+    view.image = result.image; message(""); fit();
+    scheduleNeighbors(position, endpoint, version);
+  } catch (error) {
+    if (error.name !== "AbortError" && current()) message(error.message);
+  }
+}
+
+function scheduleNeighbors(position, endpoint, detailVersion) {
+  loading.stopNeighbors();
+  if (navigator.connection?.saveData || /(^|-)2g$/.test(navigator.connection?.effectiveType || "")) return;
+  const query = filters(), filterKey = query.toString();
+  loading.neighborTimer = setTimeout(async () => {
+    const controller = new AbortController(); loading.neighborAbort = controller;
+    const current = () => !controller.signal.aborted && state.detailVersion === detailVersion &&
+      endpoint === base() && $("image-dialog").open && filters().toString() === filterKey;
+    try {
+      // Look ahead at most one sample in either direction, including across gallery pages.
+      const positions = [position + 1, position - 1].filter((p) => p >= 0 && p < state.total);
+      for (const neighbor of positions) {
+        if (!current()) return;
+        let sample = state.items[neighbor - state.offset];
+        if (!sample) {
+          const request = new URLSearchParams(query); request.set("offset", neighbor); request.set("limit", 1);
+          sample = (await api(`${endpoint}/samples?${request}`, {signal: controller.signal})).items[0];
+        }
+        if (!current() || !sample) return;
+        await loading.images.acquire(endpoint, sample, "prefetch");
+      }
+    } catch { /* Speculative errors never replace the current image or its diagnostics. */ }
+  }, 180);
 }
 
 function renderDetail(detail) {
@@ -262,7 +348,12 @@ function shape(annotation, width, height) {
   return annotation.points.map((p) => [p.x * width, p.y * height]);
 }
 
+let drawFrame = null;
 function draw() {
+  if (drawFrame !== null) return;
+  drawFrame = requestAnimationFrame(() => { drawFrame = null; drawNow(); });
+}
+function drawNow() {
   const dpr = window.devicePixelRatio || 1;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, view.width, view.height);
   if (!view.image) return;
@@ -351,7 +442,7 @@ $("page-prev").addEventListener("click", () => { state.offset = Math.max(0, stat
 $("page-next").addEventListener("click", () => { state.offset += state.limit; refresh(); });
 $("close-detail").addEventListener("click", async () => { if (await editorBeforeNavigation()) $("image-dialog").close(); });
 $("image-dialog").addEventListener("cancel", (event) => { event.preventDefault(); $("close-detail").click(); });
-$("image-dialog").addEventListener("close", () => { editorPointerCancel(); ++state.detailVersion; view.image = null; state.detail = null; });
+$("image-dialog").addEventListener("close", () => { loading.stopDetail(); editorPointerCancel(); ++state.detailVersion; view.image = null; state.detail = null; });
 $("image-prev").addEventListener("click", () => showAt(state.position - 1).catch(report));
 $("image-next").addEventListener("click", () => showAt(state.position + (state.detail?.deleted && $("edit-filter").value !== "deleted" ? 0 : 1)).catch(report));
 $("fit-image").addEventListener("click", fit);

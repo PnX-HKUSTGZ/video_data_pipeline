@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import local
+from time import monotonic
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -210,6 +211,7 @@ class DraftEditor:
         for sample in self._unique.values():
             paths[sample.image] = False
             paths[sample.label] = True
+        self._source_paths = {str(path): path for path in paths}
         self._hash_paths = {str(path) for path, content in paths.items() if content}
         for path, content in paths.items():
             self._observed[str(path)] = self._fingerprint(path, content)
@@ -220,6 +222,15 @@ class DraftEditor:
         self._revision = 0
         self._cursor = 0
         self._last = 0
+        self._loaded_revision: int | None = None
+        self._metadata_revision = -1
+        self._info_cache: dict[int, SampleInfo] = {}
+        self._counts_cache: dict[int, tuple[dict[int, int], int, LabelState]] = {}
+        self._live_classes: set[int] = set()
+        self._changed_classes: set[int] = set()
+        self._summary: tuple[int, int] | None = None
+        self._conflicts_checked = float("-inf")
+        self._conflicts: list[str] = []
         self._load()
 
     def _initial_classes(self) -> list[ClassDefinition]:
@@ -315,35 +326,57 @@ class DraftEditor:
             if write:
                 connection.execute("COMMIT")
         except sqlite3.Error as error:
+            self._loaded_revision = -1
+            self._metadata_revision = -1
             raise DraftError(f"无法保存或读取草稿：{error}") from error
         finally:
             if connection is not None:
                 if connection.in_transaction:
+                    if write:
+                        self._loaded_revision = -1
+                        self._metadata_revision = -1
                     connection.execute("ROLLBACK")
                 connection.close()
 
-    def _load(self, connection: sqlite3.Connection | None = None) -> None:
+    def _reset_snapshot(self) -> None:
+        """Clear abandoned in-memory patches when no committed workspace exists."""
+        if self._loaded_revision is None:
+            return
+        self._loaded_revision = None
+        self._metadata_revision = -1
+        self._baseline = self._fresh_baseline.model_copy(deep=True)
+        self._base_classes = self._baseline.classes
+        self._revision = self._cursor = self._last = 0
+        self._classes = [item.model_copy(deep=True) for item in self._base_classes]
+        self._overrides = {}
+
+    def _load(self, connection: sqlite3.Connection | None = None, *, cached: bool = False) -> None:
         if connection is None:
             if not self.path.exists():
+                self._reset_snapshot()
                 return
             with self._connection() as opened:
-                self._load(opened)
+                self._load(opened, cached=True)
             return
         if not connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspaces'"
         ).fetchone():
+            self._reset_snapshot()
+            return
+        revision_row = connection.execute(
+            "SELECT revision FROM workspaces WHERE id=?", (self.workspace,)
+        ).fetchone()
+        if cached and revision_row is not None and revision_row[0] == self._loaded_revision:
             return
         row = connection.execute(
             "SELECT revision,cursor,classes,baseline FROM workspaces WHERE id=?", (self.workspace,)
         ).fetchone()
         if row is None:
-            self._baseline = self._fresh_baseline.model_copy(deep=True)
-            self._base_classes = self._baseline.classes
-            self._revision = self._cursor = self._last = 0
-            self._classes = [item.model_copy(deep=True) for item in self._base_classes]
-            self._overrides = {}
+            self._reset_snapshot()
             return
         self._revision, self._cursor = row[0], row[1]
+        self._loaded_revision = self._revision
+        self._metadata_revision = -1
         self._baseline = Baseline.model_validate_json(row[3])
         self._base_classes = self._baseline.classes
         self._classes = Patch.model_validate_json(row[2]).classes or []
@@ -373,7 +406,10 @@ class DraftEditor:
         """Return actionable conflicts while keeping the saved overlay available."""
         conflicts: list[str] = []
         for name, expected in self._baseline.files.items():
-            path = Path(name)
+            path = self._source_paths.get(name)
+            if path is None:
+                path = Path(name)
+                self._source_paths[name] = path
             previous = self._observed.get(name)
             current_stamp = file_stamp(path)
             if previous is not None and previous.stamp == current_stamp and not force:
@@ -381,9 +417,28 @@ class DraftEditor:
             else:
                 current = self._fingerprint(path, name in self._hash_paths)
                 self._observed[name] = current
-            if current != expected:
+            if current.stamp != expected.stamp or current.digest != expected.digest:
                 conflicts.append(f"源文件已变化：{name}")
-        return conflicts
+        self._conflicts = conflicts
+        self._conflicts_checked = monotonic()
+        return list(conflicts)
+
+    def sync(self) -> int:
+        """Refresh only persisted revision metadata, without scanning source files."""
+        self._load()
+        return self._revision
+
+    def _metadata(self) -> None:
+        if self._metadata_revision == self._revision:
+            return
+        self._metadata_revision = self._revision
+        self._info_cache.clear()
+        self._counts_cache.clear()
+        self._summary = None
+        base = {item.id: item for item in self._base_classes}
+        current = {item.id: item for item in self._classes}
+        self._live_classes = set(current)
+        self._changed_classes = {key for key in base if base[key] != current.get(key)}
 
     def _class(self, class_id: int) -> ClassDefinition:
         for item in self._classes:
@@ -475,8 +530,12 @@ class DraftEditor:
         return Labels(state=state, annotations=annotations, issues=issues)
 
     def _counts(self, sample: Sample) -> tuple[dict[int, int], int, LabelState]:
+        self._metadata()
+        cached = self._counts_cache.get(sample.id)
+        if cached is not None:
+            return cached
         override = self._overrides.get(self._keys[sample.id])
-        live = {item.id for item in self._classes}
+        live = self._live_classes
         if override is not None:
             counts = (
                 dict(Counter(obj.class_id for obj in override.objects if obj.class_id in live))
@@ -491,17 +550,19 @@ class DraftEditor:
         state: LabelState = (
             "invalid" if issues else "valid" if counts else "missing" if missing else "empty"
         )
-        return counts, issues, state
+        result = (counts, issues, state)
+        self._counts_cache[sample.id] = result
+        return result
 
     def info(self, sample: Sample) -> SampleInfo:
+        self._metadata()
+        cached = self._info_cache.get(sample.id)
+        if cached is not None:
+            return cached
         counts, issues, state = self._counts(sample)
         key = self._keys[sample.id]
-        base = {item.id: item for item in self._base_classes}
-        current = {item.id: item for item in self._classes}
-        schema_changed = any(
-            base.get(class_id) != current.get(class_id) for class_id in sample.counts
-        )
-        return SampleInfo(
+        schema_changed = not self._changed_classes.isdisjoint(sample.counts)
+        result = SampleInfo(
             id=sample.id,
             path=sample.display_path,
             split=sample.split,
@@ -513,6 +574,8 @@ class DraftEditor:
             modified=key in self._overrides or schema_changed,
             deleted=bool(key in self._overrides and self._overrides[key].deleted),
         )
+        self._info_cache[sample.id] = result
+        return result
 
     def selected(
         self,
@@ -521,8 +584,11 @@ class DraftEditor:
         state: LabelState | None,
         search: str,
         edit_state: str | None = None,
+        *,
+        refresh: bool = True,
     ) -> list[SampleInfo]:
-        self._load()
+        if refresh:
+            self._load()
         query = search.casefold()
         result: list[SampleInfo] = []
         for sample in self.dataset.samples:
@@ -583,10 +649,21 @@ class DraftEditor:
             revision=self._revision,
         )
 
-    def status(self, *, refresh: bool = True) -> DraftStatus:
+    def status(self, *, refresh: bool = True, cached_conflicts: bool = False) -> DraftStatus:
         if refresh:
             self._load()
-        infos = [self.info(sample) for sample in self._unique.values()]
+        self._metadata()
+        if self._summary is None:
+            infos = [self.info(sample) for sample in self._unique.values()]
+            self._summary = (
+                sum(info.modified for info in infos),
+                sum(info.deleted for info in infos),
+            )
+        conflicts = (
+            list(self._conflicts)
+            if cached_conflicts and monotonic() - self._conflicts_checked < 1
+            else self.check_sources(force=False)
+        )
         return DraftStatus(
             revision=self._revision,
             classes=self._classes,
@@ -594,9 +671,9 @@ class DraftEditor:
             dirty=bool(self._overrides or self._classes != self._base_classes),
             can_undo=self._cursor > 0,
             can_redo=self._cursor < self._last,
-            conflicts=self.check_sources(force=False),
-            modified_images=sum(info.modified for info in infos),
-            deleted_images=sum(info.deleted for info in infos),
+            conflicts=conflicts,
+            modified_images=self._summary[0],
+            deleted_images=self._summary[1],
         )
 
     def _guard(self, expected_revision: int) -> None:
@@ -762,6 +839,7 @@ class DraftEditor:
                 (self.workspace,),
             )
         self._revision += 1
+        self._loaded_revision = self._revision
         self._cursor += 1
         self._last = self._cursor
         return self.status(refresh=False)
@@ -784,6 +862,7 @@ class DraftEditor:
                 (seq if redo else seq - 1, self.workspace),
             )
         self._revision += 1
+        self._loaded_revision = self._revision
         self._cursor = seq if redo else seq - 1
         return self.status(refresh=False)
 
@@ -815,6 +894,7 @@ class DraftEditor:
                 ),
             )
         self._revision += 1
+        self._loaded_revision = self._revision
         self._cursor = self._last = 0
         self._overrides = {}
         self._baseline = self._fresh_baseline.model_copy(deep=True)

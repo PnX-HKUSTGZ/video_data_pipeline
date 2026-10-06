@@ -167,12 +167,19 @@ def _report(run: RunMetadata, records: list[FrameRecord], started: float) -> Run
     }
 
 
-def run_pipeline(config: Config) -> RunReport:
-    """固定输入清单，只加载一次模型，独立划分每个视频并合并到同一数据集。
+def run_pipeline(config: Config, devices: list[int] | None = None) -> RunReport:
+    """固定输入清单，独立划分每个视频并合并到同一数据集。
 
+    默认单进程复用模型；提供 devices 时每张物理 GPU 使用一个常驻模型进程。
     启动前检查所有视频的处理区间。任一处理失败则整次运行失败，保留诊断和已
     导出产物，清理暂存文件。只有全部视频处理及数据校验通过才写完成标记。
     """
+    if devices is not None and (
+        not devices
+        or len(set(devices)) != len(devices)
+        or any(type(d) is not int or d < 0 for d in devices)
+    ):
+        raise ValueError("devices must contain distinct nonnegative GPU indices")
     root = Path(config.output).resolve()
     if root.exists() and any(root.iterdir()):
         raise ValueError("Output directory must be empty; choose a new --output directory")
@@ -237,61 +244,70 @@ def run_pipeline(config: Config) -> RunReport:
     active: SourceMetadata | None = None
     device_configured = False
     try:
-        device = configure_device(config.device)
-        device_configured = True
-        gpu_snapshot(root, "before")
-        detector = Detector(config, device)
-        if detector.names != names:
-            raise ValueError("Loaded detector changed the class mapping")
-        run["task"] = detector.task
+        if devices is not None:
+            from .parallel import infer_parallel
+
+            configure_device("cpu")
+            infer_parallel(config, root, run, records, devices)
+        else:
+            device = configure_device(config.device)
+            device_configured = True
+            gpu_snapshot(root, "before")
+            detector = Detector(config, device)
+            if detector.names != names:
+                raise ValueError("Loaded detector changed the class mapping")
+            run["task"] = detector.task
+            if detector.pose is not None:
+                run["pose"] = detector.pose
+            if config.save_video:
+                LOG.info("Video saving enabled: infer every source frame; sample_fps ignored")
+            LOG.info("Inference batch size: %s", config.batch_size)
+            for active, frames in zip(videos, decoders, strict=True):
+                current = []
+                active["status"] = "inference"
+                write_json(run_path, run)
+                LOG.info("Processing %s: %s", active["source_id"], active["input"])
+                _infer(config, root, run, active, detector, frames, current, len(records))
+                if config.smoke_frames and len(current) != config.smoke_frames:
+                    raise ValueError(
+                        "Smoke sampling did not produce the requested number of frames"
+                    )
+                active["status"] = "exporting"
+                exported, split_info = export_records(
+                    root, current, config.train_fraction, config.split_gap_seconds, True
+                )
+                active["split"] = split_info
+                active["status"] = "complete"
+                records.extend(exported)
+                current = []
+                _cleanup_staging(root)
+                run["candidate_frames"] = len(records)
+                write_json(run_path, run)
+                write_json(
+                    root / "progress.json",
+                    {
+                        "run_id": run["run_id"],
+                        "source_id": active["source_id"],
+                        "completed_videos": sum(v["status"] == "complete" for v in videos),
+                        "total_videos": len(videos),
+                        "samples": len(records),
+                        "status": "inference",
+                    },
+                )
         data: dict[str, object] = {
             "path": str(root),
             "train": "images/train",
             "val": "images/val",
             "names": names,
         }
-        if detector.pose is not None:
-            pose = detector.pose
-            run["pose"] = pose
+        if "pose" in run:
+            pose = run["pose"]
             data["kpt_shape"] = [pose["source_kpt_shape"][0], 3]
             if "kpt_names" in pose:
                 data["kpt_names"] = pose["kpt_names"]
             if "flip_idx" in pose:
                 data["flip_idx"] = pose["flip_idx"]
         atomic_bytes(root / "data.yaml", yaml.safe_dump(data, allow_unicode=True).encode())
-        if config.save_video:
-            LOG.info("Video saving enabled: infer every source frame; sample_fps ignored")
-        LOG.info("Inference batch size: %s", config.batch_size)
-        for active, frames in zip(videos, decoders, strict=True):
-            current = []
-            active["status"] = "inference"
-            write_json(run_path, run)
-            LOG.info("Processing %s: %s", active["source_id"], active["input"])
-            _infer(config, root, run, active, detector, frames, current, len(records))
-            if config.smoke_frames and len(current) != config.smoke_frames:
-                raise ValueError("Smoke sampling did not produce the requested number of frames")
-            active["status"] = "exporting"
-            exported, split_info = export_records(
-                root, current, config.train_fraction, config.split_gap_seconds, True
-            )
-            active["split"] = split_info
-            active["status"] = "complete"
-            records.extend(exported)
-            current = []
-            _cleanup_staging(root)
-            run["candidate_frames"] = len(records)
-            write_json(run_path, run)
-            write_json(
-                root / "progress.json",
-                {
-                    "run_id": run["run_id"],
-                    "source_id": active["source_id"],
-                    "completed_videos": sum(v["status"] == "complete" for v in videos),
-                    "total_videos": len(videos),
-                    "samples": len(records),
-                    "status": "inference",
-                },
-            )
         active = None
         report = _report(run, records, started)
         run.update(

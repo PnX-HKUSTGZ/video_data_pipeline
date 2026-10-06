@@ -1,0 +1,20 @@
+# 全部全国赛红方视频；并行卡通过 CLI --devices 0 2 3 7 指定。
+input: datasets/rm26_fps_videos/videos/全国赛/红方
+output: datasets/generated/rm26_exchange_pose/national_red_20261007
+model: models/RM26_engineer_exchange_model/yolopose/v11.02/best.pt
+model_yaml: models/RM26_engineer_exchange_model/yolopose/v11.02/openvino_best/metadata.yaml
+sample_fps: 2.0
+confidence: 0.5
+keypoint_confidence: 0.5
+iou: 0.7
+imgsz: 640
+batch_size: 8
+start: 0.0
+end: null
+train_fraction: 0.8
+split_gap_seconds: 5.0
+device: 0
+jpeg_quality: 95
+smoke_frames: 0
+save_video: false
+recursive: false

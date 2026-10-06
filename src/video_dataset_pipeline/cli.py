@@ -36,7 +36,11 @@ def main() -> None:
         default=None,
         help="Include videos in subdirectories",
     )
-    run.add_argument("--device", type=parse_device, help="GPU index (e.g. 4) or cpu")
+    device_options = run.add_mutually_exclusive_group()
+    device_options.add_argument("--device", type=parse_device, help="GPU index (e.g. 4) or cpu")
+    device_options.add_argument(
+        "--devices", type=int, nargs="+", help="Parallel physical GPU indices, e.g. 0 2 3 7"
+    )
     run.add_argument(
         "--save-video",
         action=argparse.BooleanOptionalAction,
@@ -77,7 +81,9 @@ def main() -> None:
             from .pipeline import run_pipeline
 
             config_path = as_str(arguments.pop("config"))
-            result = run_pipeline(load_config(config_path, arguments))
+            devices = cast(list[int] | None, arguments.pop("devices"))
+            config = load_config(config_path, arguments)
+            result = run_pipeline(config) if devices is None else run_pipeline(config, devices)
         else:
             from .device import configure_device
 

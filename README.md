@@ -71,6 +71,15 @@ uv run --locked video-dataset validate datasets/generated/rm26_exchange/recvlnoy
 
 配置中用 `device: 4` 选择 `nvidia-smi` 显示的 GPU4，也可以写 `device: cpu`。命令行通过 `--device 4` 或 `--device cpu` 覆盖。默认配置使用 GPU4；视频在 CPU 解码，不创建显示窗口或 GPU 渲染上下文。
 
+多个视频可通过 `--devices 0 2 3 7` 在指定物理 GPU 上并行，每卡一个进程，复用模型并动态领取完整视频。该参数覆盖 YAML 的单卡 `device`，与 CLI `--device` 互斥；设备列表和进程号保存在 `parallel.json`。使用前先检查这些卡是否空闲，程序不会自动占用其他卡。
+
+```bash
+uv run --locked video-dataset run --config configs/rm26_national_red_pose.yaml \
+  --devices 0 2 3 7
+```
+
+每个进程独立写入该视频产物，主进程按固定来源顺序合并到同一个数据集，逐视频划分规则不变。任一子进程失败会停止本次运行并回收其他子进程，保留诊断与已导出文件，清理暂存文件，不写完成标记。运行日志按 10 MiB 轮转、保留 3 份，GPU 快照与逐视频诊断保存在输出的 `workers/` 下。相同 GPU 不得重复指定，不支持恢复。
+
 `save_video` 默认是 `false`。设为 `true` 或添加 `--save-video` 后，**禁止抽帧，逐帧推理并保存** `[start, end)` 区间内的全部源视频帧，单视频在数据集根目录生成 `inference.mp4`，多视频分别保存到 `inference_videos/`。此时忽略 `sample_fps`；不允许同时设置 `smoke_frames > 0`，短片段测试请使用 `start/end`。`--no-save-video` 可覆盖配置将其关闭，恢复按配置抽帧。
 
 视频使用 H.264/MP4、无音频，保留源帧时间戳和播放速度，最后一帧显示至处理区间结尾；25 FPS 源视频每秒处理并保存约 25 帧，变帧率视频也不会丢弃密集帧。视频包含无检测帧和随后被划分间隔排除的帧，叠加有效检测框、类别、置信度、源时间戳和推理阶段状态。数据集候选同样使用全部处理帧，再按置信度和时间划分规则筛选，因此启用后推理量及图片数量会增加。编码在 CPU 上流式进行，保持原图尺寸；奇数宽高仅在右侧或底部补一个黑像素以兼容播放器。关闭时不会创建编码器或视频文件。

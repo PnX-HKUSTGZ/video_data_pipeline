@@ -22,6 +22,7 @@ class ConfigValues(TypedDict):
     keypoint_confidence: NotRequired[float]
     iou: NotRequired[float]
     imgsz: NotRequired[int]
+    batch_size: NotRequired[int]
     train_fraction: NotRequired[float]
     split_gap_seconds: NotRequired[float]
     device: NotRequired[int | str]
@@ -46,6 +47,7 @@ class Config:
     keypoint_confidence: float = 0.5
     iou: float = 0.7
     imgsz: int = 640
+    batch_size: int = 1
     train_fraction: float = 0.8
     split_gap_seconds: float = 5.0
     device: int | str = 0
@@ -84,6 +86,8 @@ class Config:
             raise ValueError("train_fraction must be in (0, 1)")
         if self.imgsz <= 0 or self.imgsz % 32 or not 1 <= self.jpeg_quality <= 100:
             raise ValueError("imgsz must be a positive multiple of 32; JPEG quality is 1..100")
+        if as_int(self.batch_size) <= 0:
+            raise ValueError("batch_size must be a positive integer")
         if self.smoke_frames < 0:
             raise ValueError("smoke_frames must be nonnegative")
         if not isinstance(self.save_video, bool):
@@ -139,7 +143,7 @@ def load_config(path: str | Path, overrides: Mapping[str, object] | None = None)
             data[key] = as_float(data[key])
     if data.get("end") is not None:
         data["end"] = as_float(data["end"])
-    for key in ("imgsz", "jpeg_quality", "smoke_frames"):
+    for key in ("imgsz", "batch_size", "jpeg_quality", "smoke_frames"):
         if key in data:
             data[key] = as_int(data[key])
     if "device" in data:

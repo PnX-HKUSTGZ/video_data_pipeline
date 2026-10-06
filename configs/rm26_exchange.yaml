@@ -6,6 +6,7 @@ sample_fps: 2.0
 confidence: 0.5
 iou: 0.7
 imgsz: 640
+batch_size: 1  # 可设为 4、8、16，按可用显存和实测吞吐选择
 start: 0.0
 end: null
 train_fraction: 0.8

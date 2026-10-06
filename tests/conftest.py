@@ -37,6 +37,9 @@ def synthetic_run(tmp_path, monkeypatch):
             self.task = "detect"
             self.pose = None
 
+        def predict_batch(self, images):
+            return [self.predict(image) for image in images]
+
         def predict(self, image):
             FakeDetector.calls += 1
             if FakeDetector.calls == FakeDetector.fail_at:

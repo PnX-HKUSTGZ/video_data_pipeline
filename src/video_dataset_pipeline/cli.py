@@ -54,6 +54,7 @@ def main() -> None:
         "split-gap-seconds",
     ):
         run.add_argument(f"--{field}", type=float)
+    run.add_argument("--batch-size", type=int, help="Frames per inference batch (default: 1)")
     for field in ("imgsz", "jpeg-quality", "smoke-frames"):
         run.add_argument(f"--{field}", type=int)
     validate = subcommands.add_parser(

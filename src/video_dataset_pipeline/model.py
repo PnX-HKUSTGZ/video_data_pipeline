@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import logging
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import yaml
 
@@ -11,6 +14,9 @@ from .metadata import PoseMetadata
 from .pose import load_pose_metadata, read_keypoint_shape
 from .records import BGRImage, RawDetection, RawKeypoint, Task
 from .util import as_mapping
+
+if TYPE_CHECKING:
+    from ultralytics.engine.results import Results
 
 REPO_ID = "hkustenterprize/RM26_engineer_exchange_model"
 REVISION = "afab41a8b61c399bf71480f0fd52352ed660b994"
@@ -149,23 +155,25 @@ class Detector:
             LOG.info("Using configured image size %s (published model size: 640)", config.imgsz)
 
     def predict(self, image: BGRImage) -> list[RawDetection]:
-        """对单张原分辨率 BGR 图像推理，返回像素坐标框、类别和置信度。
+        """单帧接口复用批量推理，保持原有调用和返回类型。"""
+        return self.predict_batch([image])[0]
 
-        Ultralytics 负责缩放及坐标还原；这里额外执行类别内 NMS，使配置的 IoU
-        阈值对 YOLO26 端到端检测头同样生效；同一索引同时筛选框和点，保持对应。
-        pose 点保留原分数，坐标由 Ultralytics 映射回原图，后续筛选负责归一化。
+    def predict_batch(self, images: Sequence[BGRImage]) -> list[list[RawDetection]]:
+        """一次推理同一视频的一组 BGR 图像，按输入顺序返回逐帧检测结果。
+
+        图像尺寸必须相同，以保持与单帧相同的矩形缩放方式；调用方负责按配置
+        限制批次大小。空批次不调用模型，末批无需补齐。输出数量不符时直接报错，
+        不截断或错配帧。CUDA 显存不足沿用运行失败流程，不自动改变 batch 或精度。
         """
-        import torch
-
-        # torchvision does not ship a py.typed marker.
-        from torchvision.ops import batched_nms  # type: ignore[import-untyped]
-        from ultralytics.engine.results import Results
-
-        # Non-streaming detection returns Results, not embedding tensors or an iterator.
-        result = cast(
-            list[Results],
+        if not images:
+            return []
+        if any(image.shape != images[0].shape for image in images):
+            raise ValueError("Inference batch requires images with the same dimensions")
+        results = cast(
+            "list[Results]",
             self.model.predict(
-                image,
+                list(images),
+                batch=len(images),
                 imgsz=self.config.imgsz,
                 conf=self.config.confidence,
                 iou=self.config.iou,
@@ -175,8 +183,27 @@ class Detector:
                 quantize=32,
                 max_det=300,
                 stream=False,
+                rect=True,
             ),
-        )[0]
+        )
+        if len(results) != len(images):
+            raise ValueError("Detector result count differs from inference batch size")
+        return [
+            self._decode_result(result, image)
+            for result, image in zip(results, images, strict=True)
+        ]
+
+    def _decode_result(self, result: Results, image: BGRImage) -> list[RawDetection]:
+        """解析一帧的原图结果；类别内 NMS 同时筛选框和点，保持实例对应。
+
+        每张图独立执行 NMS，避免不同帧的目标互相抑制；YOLO26 端到端检测头也
+        遵守配置的 IoU 阈值。pose 点保留原分数，后续筛选负责归一化。
+        """
+        import torch
+
+        # torchvision does not ship a py.typed marker.
+        from torchvision.ops import batched_nms  # type: ignore[import-untyped]
+
         if result.orig_shape != image.shape[:2]:
             raise ValueError("Detector did not return coordinates in the source image space")
         if result.boxes is None or not isinstance(result.boxes.data, torch.Tensor):

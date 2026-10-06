@@ -2,6 +2,7 @@ import logging
 import shutil
 import time
 from contextlib import nullcontext
+from itertools import batched
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from uuid import uuid4
@@ -46,6 +47,7 @@ def _infer(
     """使用共享模型处理一个视频；只暂存有效帧，并向总推理清单追加记录。
 
     记录携带来源编号，帧号和时间戳仍属于源视频。预览计数在每个视频开始时重置；
+    按 batch_size 累积待推理帧，末批不足时直接处理，不跨视频混合。
     保存视频时对区间内的全部源帧推理，保持该视频自身时间间隔。
     """
     names, pose = detector.names, detector.pose
@@ -67,62 +69,65 @@ def _infer(
         else nullcontext()
     )
     with (root / "inference.jsonl").open("a", encoding="utf-8") as manifest, video_context as video:
-        for index, timestamp, image in frames:
-            height, width = image.shape[:2]
-            raw = detector.predict(image)
-            if not records:
-                gpu_snapshot(root, f"{source['source_id']}_startup")
-            detections, rejected = filter_detections(
-                raw,
-                width,
-                height,
-                len(names),
-                config.confidence,
-                pose["source_kpt_shape"] if pose is not None else None,
-                config.keypoint_confidence,
-            )
-            record = FrameRecord(
-                frame_index=index,
-                timestamp=timestamp,
-                width=width,
-                height=height,
-                split=None,
-                status=candidate_status(detections),
-                detections=detections,
-                rejected_detections=rejected,
-                source_id=source["source_id"],
-            )
-            name = f"{prefix}_f{index:08d}"
-            if record.status == "candidate":
-                path = Path(".staging") / f"{name}.jpg"
-                save_jpeg(root / path, image, config.jpeg_quality)
-                record.candidate_image = str(path)
-            previews.save(name, image, record)
-            if video is not None:
-                video.write(annotate_frame(image, record, names, point_names), timestamp)
-            append_record(manifest, record)
-            records.append(record)
-            source["candidate_frames"] = len(records)
-            if len(records) % 50 == 0:
-                LOG.info(
-                    "%s: processed %s samples; timestamp %.2fs",
-                    source["source_id"],
-                    len(records),
-                    timestamp,
+        for batch in batched(frames, config.batch_size):
+            predictions = detector.predict_batch([image for _, _, image in batch])
+            if len(predictions) != len(batch):
+                raise ValueError("Detector result count differs from inference batch size")
+            for (index, timestamp, image), raw in zip(batch, predictions, strict=True):
+                height, width = image.shape[:2]
+                if not records:
+                    gpu_snapshot(root, f"{source['source_id']}_startup")
+                detections, rejected = filter_detections(
+                    raw,
+                    width,
+                    height,
+                    len(names),
+                    config.confidence,
+                    pose["source_kpt_shape"] if pose is not None else None,
+                    config.keypoint_confidence,
                 )
-                write_json(
-                    root / "progress.json",
-                    {
-                        "run_id": run["run_id"],
-                        "source_id": source["source_id"],
-                        "source_samples": len(records),
-                        "samples": completed_samples + len(records),
-                        "timestamp": timestamp,
-                        "status": "inference",
-                    },
+                record = FrameRecord(
+                    frame_index=index,
+                    timestamp=timestamp,
+                    width=width,
+                    height=height,
+                    split=None,
+                    status=candidate_status(detections),
+                    detections=detections,
+                    rejected_detections=rejected,
+                    source_id=source["source_id"],
                 )
-            if len(records) % 200 == 0:
-                gpu_snapshot(root, "execution")
+                name = f"{prefix}_f{index:08d}"
+                if record.status == "candidate":
+                    path = Path(".staging") / f"{name}.jpg"
+                    save_jpeg(root / path, image, config.jpeg_quality)
+                    record.candidate_image = str(path)
+                previews.save(name, image, record)
+                if video is not None:
+                    video.write(annotate_frame(image, record, names, point_names), timestamp)
+                append_record(manifest, record)
+                records.append(record)
+                source["candidate_frames"] = len(records)
+                if len(records) % 50 == 0:
+                    LOG.info(
+                        "%s: processed %s samples; timestamp %.2fs",
+                        source["source_id"],
+                        len(records),
+                        timestamp,
+                    )
+                    write_json(
+                        root / "progress.json",
+                        {
+                            "run_id": run["run_id"],
+                            "source_id": source["source_id"],
+                            "source_samples": len(records),
+                            "samples": completed_samples + len(records),
+                            "timestamp": timestamp,
+                            "status": "inference",
+                        },
+                    )
+                if len(records) % 200 == 0:
+                    gpu_snapshot(root, "execution")
 
 
 def _decode_summary(videos: list[SourceMetadata]) -> DecodeStats:
@@ -256,6 +261,7 @@ def run_pipeline(config: Config) -> RunReport:
         atomic_bytes(root / "data.yaml", yaml.safe_dump(data, allow_unicode=True).encode())
         if config.save_video:
             LOG.info("Video saving enabled: infer every source frame; sample_fps ignored")
+        LOG.info("Inference batch size: %s", config.batch_size)
         for active, frames in zip(videos, decoders, strict=True):
             current = []
             active["status"] = "inference"

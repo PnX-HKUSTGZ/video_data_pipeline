@@ -354,3 +354,56 @@ def test_pose_adapter_result_shapes(fake_yolo, mode):
             result.keypoints.data = result.keypoints.data[:1]
         with pytest.raises(ValueError, match="keypoints|shape"):
             model.Detector(config, "cpu").predict(image)
+
+
+def test_batch_adapter_preserves_image_order_and_independent_nms(fake_yolo):
+    config, yolo, result, image = fake_yolo
+    from ultralytics.engine.results import Results
+
+    second = Results(
+        image,
+        "second",
+        result.names,
+        boxes=result.boxes.data[[0]].clone(),
+        keypoints=result.keypoints.data[[0]].clone(),
+    )
+    second.boxes.data[0, :4] += 5
+    second.keypoints.data[..., :2] += 5
+    calls = []
+
+    def predict(images, **kwargs):
+        calls.append((len(images), kwargs))
+        assert images[0] is image
+        return [result, result[:0], second]
+
+    yolo.predict = predict
+    predictions = model.Detector(config, "cpu").predict_batch([image, image.copy(), image.copy()])
+    assert len(calls) == 1
+    assert calls[0][0] == calls[0][1]["batch"] == 3
+    assert calls[0][1]["rect"] is True
+    assert [len(p) for p in predictions] == [2, 0, 1]
+    assert [d.class_id for d in predictions[0]] == [0, 1]
+    assert predictions[0][0].keypoints[0].xy == (30, 30)
+    assert predictions[2][0].xyxy == (5, 5, 105, 85)
+    assert predictions[2][0].keypoints[0].xy == (15, 15)
+
+
+def test_batch_adapter_checks_result_count_empty_input_and_dimensions(fake_yolo):
+    config, _, _, image = fake_yolo
+    detector = model.Detector(config, "cpu")
+    assert detector.predict_batch([]) == []
+    with pytest.raises(ValueError, match="result count"):
+        detector.predict_batch([image, image.copy()])
+    with pytest.raises(ValueError, match="same dimensions"):
+        detector.predict_batch([image, image[:50]])
+
+
+def test_pose_pipeline_supports_partial_batches(pose_run):
+    config, detector = pose_run
+    config = replace(config, batch_size=7)
+    report = pipeline.run_pipeline(config)
+    records = read_records(Path(config.output) / "frames.jsonl")
+    assert len(records) == detector.calls == 24
+    assert report["no_keypoints_frames"] > 0
+    assert report["keypoints"]["valid_points"] > 0
+    assert validate_dataset(config.output)["valid"]

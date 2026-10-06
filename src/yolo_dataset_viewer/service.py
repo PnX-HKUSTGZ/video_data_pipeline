@@ -56,6 +56,15 @@ class BrowserView(BaseModel):
     draft: DraftStatus | None
 
 
+class SamplePosition(BaseModel):
+    """Current location or insertion point of a sample in filtered order."""
+
+    position: int | None
+    insertion: int
+    total: int
+    revision: int
+
+
 ImageKey = tuple[str, int, tuple[int, int] | None]
 SelectionKey = tuple[str, int, str | None, int | None, LabelState | None, str, str | None]
 
@@ -349,6 +358,37 @@ class ViewerService:
     ) -> Stats:
         with self._edit_lock:
             return self._selection(session_id, split, class_id, state, search, edit_state)[1]
+
+    def position(
+        self,
+        session_id: str,
+        sample_id: int,
+        split: str | None,
+        class_id: int | None,
+        state: LabelState | None,
+        search: str,
+        edit_state: str | None = None,
+    ) -> SamplePosition:
+        """Locate a sample after edits change membership in the active filter."""
+        with self._edit_lock:
+            self.sample(session_id, sample_id)
+            selected, stats = self._selection(
+                session_id, split, class_id, state, search, edit_state
+            )
+            low, high = 0, len(selected)
+            while low < high:
+                middle = (low + high) // 2
+                if selected[middle].id < sample_id:
+                    low = middle + 1
+                else:
+                    high = middle
+            found = low < len(selected) and selected[low].id == sample_id
+            return SamplePosition(
+                position=low if found else None,
+                insertion=low,
+                total=len(selected),
+                revision=stats.revision,
+            )
 
     def view(
         self,

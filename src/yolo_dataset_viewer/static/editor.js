@@ -3,7 +3,7 @@
 // Edits are serialized and acknowledged only after the SQLite transaction commits.
 const editor = {draft: null, enabled: false, queue: [], saving: null, failure: null,
   tool: "browse", space: false, gesture: null, pointIndex: 0, preview: null, exporting: false,
-  exportResult: null, classStats: [], repairLine: null, optionSchema: null, selectionSchema: null, reloadController: null};
+  exportResult: null, classStats: [], repairLine: null, optionSchema: null, selectionSchema: null, reloadController: null, classForms: new Map()};
 
 function editorError(error, target = "editor-error") {
   const text = error ? error.message || String(error) : "";
@@ -11,7 +11,7 @@ function editorError(error, target = "editor-error") {
 }
 function editorReset() {
   editor.reloadController?.abort(); editor.reloadController = null;
-  editor.optionSchema = null; editor.selectionSchema = null;
+  editor.optionSchema = null; editor.selectionSchema = null; editor.classForms.clear();
   editor.draft = null; editor.enabled = false; editor.tool = "browse"; editor.gesture = null; editor.repairLine = null;
   $("draft-bar").hidden = true; $("edit-filter").hidden = true; $("edit-filter").value = "";
   $("edit-toolbar").hidden = true; $("object-editor").hidden = true;
@@ -72,12 +72,14 @@ async function editorBeforeNavigation() {
   }
   return true;
 }
-function editorWritable() {
+function editorWritable({geometry = true} = {}) {
   if (!editor.enabled || !editor.draft || editor.exporting) return false;
   if (editor.saving || editor.queue.length) {
     editorError("正在保存上一项修改，请稍候。"); return false;
   }
-  if ($("image-dialog").open && !view.image) return false;
+  if (geometry && $("image-dialog").open && !view.image) {
+    editorError("图片尚未加载或无法读取，暂不能修改坐标；仍可删除图片或异常标签。"); return false;
+  }
   if ($("image-dialog").open && state.detail && state.detail.revision !== editor.draft.revision) {
     editorError("标注已有更新，正在读取最新版本，请检查后再编辑。"); editorReloadDetail(); return false;
   }
@@ -87,7 +89,7 @@ function editorWritable() {
   return true;
 }
 async function editorSubmit(operation) {
-  if (!editorWritable()) return false;
+  if (!editorWritable({geometry: operation.kind === "annotation_upsert"})) return false;
   if (["class_add", "class_rename"].includes(operation.kind) && (!operation.name || editor.draft.classes.some((c) => c.name === operation.name && c.id !== operation.class_id))) {
     editorError("类别名称不能为空，且不能与其他类别同名。", "classes-error"); return false;
   }
@@ -114,8 +116,9 @@ async function editorDrain() {
         const body = {expected_revision: editor.draft.revision};
         if (item.operation) body.operation = item.operation;
         editor.draft = await api(`${base()}/draft/${item.path}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+        editorAcknowledgeClassForm(item.operation);
         if (editor.draft.session_id && editor.draft.session_id !== state.session) {
-          loading.reset();
+          loading.reset(); editor.classForms.clear(); editor.selectionSchema = null;
           state.session = editor.draft.session_id;
           localStorage.setItem("yolo-viewer-session", JSON.stringify({id:state.session,request:state.request}));
           if ($("image-dialog").open) $("image-dialog").close();
@@ -167,6 +170,13 @@ async function editorReloadDetail() {
   try {
     const detail = await editorFetchDetail(endpoint, id, {signal: controller.signal});
     if (controller.signal.aborted || version !== state.detailVersion || endpoint !== base() || state.detail?.id !== id || state.detail.key !== key) return;
+    if (detail.id !== id || detail.key !== key) {
+      // A file stamp is not an image identity: different samples can have identical stamps.
+      view.image = null; state.detail = null; editor.selectionSchema = null;
+      $("image-dialog").close(); draw();
+      notice("图片索引已变化，请从更新后的列表重新打开图片。");
+      await refresh(); return;
+    }
     if (imageVersion !== detail.image_version) {
       // The source image changed. Release stale pixels before restoring editable geometry.
       view.image = null; draw();
@@ -180,6 +190,7 @@ async function editorReloadDetail() {
     const next = detail.annotations.findIndex((a) => a.uid === uid);
     selectAnnotation(next >= 0 ? next : Math.min(view.selected, detail.annotations.length - 1));
     editorRenderStatus();
+    if (typeof syncInspectorPosition === "function") await syncInspectorPosition();
   } catch (error) { if (error.name !== "AbortError") editorError(error); }
   finally { if (editor.reloadController === controller) editor.reloadController = null; }
 }
@@ -279,28 +290,63 @@ async function editorSaveAnnotation(annotation, annotationId) {
   return success;
 }
 
+// Form edits are local until their own confirmation; unrelated saves must preserve them.
+function editorAcknowledgeClassForm(operation) {
+  if (!operation) return;
+  if (operation.kind === "class_delete") { editor.classForms.delete(operation.class_id); return; }
+  const form = editor.classForms.get(operation.class_id);
+  const saved = editor.draft.classes.find((c) => c.id === operation.class_id);
+  if (!form || !saved) return;
+  if (operation.kind === "class_rename") {
+    form.name = saved.name; form.nameDirty = false;
+  } else if (operation.kind === "keypoints_set") {
+    form.keypoints = structuredClone(saved.keypoints); form.keypointsDirty = false;
+  }
+}
+
+function editorClassForm(definition) {
+  let form = editor.classForms.get(definition.id);
+  if (!form) {
+    form = {name: definition.name, keypoints: structuredClone(definition.keypoints), nameDirty: false, keypointsDirty: false};
+    editor.classForms.set(definition.id, form);
+  }
+  if (!form.nameDirty) form.name = definition.name;
+  if (!form.keypointsDirty) form.keypoints = structuredClone(definition.keypoints);
+  return form;
+}
+
 // Stable IDs, rather than names or positions, preserve point coordinates during list edits.
 async function renderClassManager() {
   if (!editor.draft) return;
   try { editor.classStats = (await api(`${base()}/stats`)).classes; } catch { editor.classStats = []; }
+  const live = new Set(editor.draft.classes.map((c) => c.id));
+  for (const id of editor.classForms.keys()) if (!live.has(id)) editor.classForms.delete(id);
   $("class-manager").replaceChildren(...editor.draft.classes.map((c) => {
+    const form = editorClassForm(c);
     const card = element("section", "class-editor"); card.dataset.classId = c.id;
     const head = element("div", "button-row"), name = element("input");
-    name.value = c.name; name.setAttribute("aria-label", `类别 ${c.id} 名称`);
+    name.value = form.name; name.setAttribute("aria-label", `类别 ${c.id} 名称`);
+    const pending = element("p", "field-hint class-form-pending", "有未保存的表单修改，请分别确认名称和关键点列表。");
+    const updatePending = () => {
+      form.nameDirty = form.name !== c.name;
+      form.keypointsDirty = JSON.stringify(form.keypoints) !== JSON.stringify(c.keypoints);
+      pending.hidden = !form.nameDirty && !form.keypointsDirty;
+    };
+    name.addEventListener("input", () => { form.name = name.value; updatePending(); });
     const rename = element("button", "secondary", "重命名"), remove = element("button", "subtle danger", "删除类别");
-    rename.addEventListener("click", () => editorSubmit({kind: "class_rename", class_id: c.id, name: name.value.trim()}));
+    rename.addEventListener("click", () => editorSubmit({kind: "class_rename", class_id: c.id, name: form.name.trim()}));
     remove.addEventListener("click", async () => {
       const counts = editor.classStats.find((s) => s.id === c.id);
       if (confirm(`删除类别“${c.name}”？将删除 ${counts?.instances ?? "全部"} 个目标，影响 ${counts?.images ?? "相关"} 张图片及其关键点。图片保留，操作可撤销。`)) await editorSubmit({kind: "class_delete", class_id: c.id});
     });
-    head.append(element("span", "tiny-badge", c.id), name, rename, remove); card.append(head);
-    const items = c.keypoints.map((k) => ({...k}));
+    head.append(element("span", "tiny-badge", c.id), name, rename, remove); card.append(head, pending);
+    const items = form.keypoints;
     const list = element("div", "keypoint-definition-list");
     const render = () => {
       list.replaceChildren(...items.map((point, i) => {
         const row = element("div", "keypoint-definition-row"), input = element("input");
         input.value = point.name; input.setAttribute("aria-label", `${c.name} 关键点 ${i} 名称`);
-        input.addEventListener("input", () => { point.name = input.value; });
+        input.addEventListener("input", () => { point.name = input.value; updatePending(); });
         const up = element("button", "secondary", "↑"), down = element("button", "secondary", "↓"), del = element("button", "subtle danger", "移除");
         up.disabled = i === 0; down.disabled = i + 1 === items.length;
         up.dataset.edgeDisabled = String(up.disabled); down.dataset.edgeDisabled = String(down.disabled);
@@ -310,9 +356,14 @@ async function renderClassManager() {
         del.addEventListener("click", () => { items.splice(i, 1); render(); });
         row.append(element("span", "muted", i), input, up, down, del); return row;
       }));
+      updatePending();
     }; render();
     const buttons = element("div", "button-row"), add = element("button", "secondary", "增加关键点"), save = element("button", "primary", "保存关键点列表");
-    add.addEventListener("click", () => { items.push({name: `keypoint_${items.length}`}); render(); });
+    add.addEventListener("click", () => {
+      const names = new Set(items.map((point) => point.name.trim()));
+      let index = 0; while (names.has(`keypoint_${index}`)) index++;
+      items.push({name: `keypoint_${index}`}); render();
+    });
     save.addEventListener("click", async () => {
       const removed = c.keypoints.filter((k) => !items.some((v) => v.id === k.id));
       const counts = editor.classStats.find((s) => s.id === c.id);
@@ -510,13 +561,11 @@ $("save-retry").addEventListener("click", () => { editor.failure = null; editorD
 $("draft-reload").addEventListener("click", async () => {
   if (editor.queue.length && !confirm("读取最新草稿将放弃本页尚未保存的操作；已保存操作保持不变。继续？")) return;
   try {
-    editor.queue = []; editor.failure = null; editor.selectionSchema = null;
+    editor.queue = []; editor.failure = null; editor.selectionSchema = null; editor.classForms.clear();
     try { editor.draft = await api(`${base()}/draft`); }
     catch {
-      const previous = JSON.parse(localStorage.getItem("yolo-viewer-session") || "null");
-      if (previous && JSON.stringify(previous.request) === JSON.stringify(state.request)) {
-        state.session = previous.id; editor.draft = await api(`${base()}/draft`);
-      } else { await openDataset(state.request); return; }
+      // Rejoining another tab's session must reset sample IDs, pixels and pending loads together.
+      await openDataset(state.request); return;
     }
     editorRenderStatus(); await refresh(); await editorReloadDetail();
     if ($("classes-dialog").open) await renderClassManager();

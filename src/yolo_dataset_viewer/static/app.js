@@ -6,7 +6,8 @@ const tasks = {detect: "Detection", segment: "Segmentation", obb: "OBB", pose: "
 const colors = ["#198268", "#db9241", "#5779bc", "#be6579", "#7d6ab0", "#3e98a1", "#a98436"];
 const color = (id) => colors[id % colors.length];
 const state = {session: null, names: {}, offset: 0, limit: 48, total: 0, items: [],
-  openVersion: 0, viewVersion: 0, detailVersion: 0, request: null, position: 0, detail: null};
+  openVersion: 0, viewVersion: 0, detailVersion: 0, request: null, position: 0, detail: null, navigation: null};
+let inspectorPositionRequest = null;
 const canvas = $("image-canvas");
 const ctx = canvas.getContext("2d");
 const view = {image: null, scale: 1, x: 0, y: 0, selected: -1, width: 0, height: 0};
@@ -66,11 +67,11 @@ function resetGallery() {
 
 async function openDataset(request, force = false) {
   if (!(await editorBeforeNavigation())) return;
-  loading.reset(); editorReset();
+  loading.reset(); clearInspectorPosition(); editorReset();
   const version = ++state.openVersion;
   ++state.viewVersion; ++state.detailVersion;
   if ($("image-dialog").open) $("image-dialog").close();
-  view.image = null; state.detail = null; state.session = null;
+  view.image = null; state.detail = null; state.session = null; drawNow();
   state.request = {...request};
   $("dataset-path").value = request.path; $("task").value = request.task;
   $("root-path").value = request.root || "";
@@ -165,7 +166,8 @@ function renderGallery(items, endpoint) {
     if (!card) {
       card = element("button", "sample-card"); card.dataset.sampleKey = key;
       const wrap = element("div", "thumb-wrap"), img = element("img");
-      img.loading = "lazy"; img.decoding = "async";
+      img.loading = "lazy"; img.decoding = "async"; img.style.opacity = "0";
+      img.addEventListener("load", () => { img.style.opacity = "1"; });
       img.addEventListener("error", () => {
         img.hidden = true;
         if (!wrap.querySelector(".issue")) wrap.append(element("span", "issue", "图片无法读取"));
@@ -183,7 +185,7 @@ function renderGallery(items, endpoint) {
     if (img.dataset.src !== src || img.dataset.version !== (sample.image_version || "")) {
       img.dataset.version = sample.image_version || "";
       img.dataset.src = src;
-      img.hidden = false; card.querySelector(".issue")?.remove();
+      img.hidden = false; img.style.opacity = "0"; card.querySelector(".issue")?.remove();
       thumbnails.observe(img);
     }
     img.alt = sample.path;
@@ -234,6 +236,7 @@ async function refresh() {
     $("page-prev").disabled = state.offset === 0;
     $("page-next").disabled = state.offset + state.limit >= page.total;
     renderStats(stats);
+    await syncInspectorPosition();
   } catch (error) {
     if (error.name !== "AbortError" && version === state.viewVersion) report(error);
   } finally {
@@ -241,10 +244,11 @@ async function refresh() {
   }
 }
 
-async function showAt(position) {
+async function showAt(position, {fresh = false} = {}) {
   if (!(await editorBeforeNavigation())) return;
   if (position < 0 || position >= state.total) return;
   const version = ++state.detailVersion, endpoint = base();
+  clearInspectorPosition();
   loading.detailAbort?.abort();
   clearTimeout(loading.neighborTimer); loading.neighborAbort?.abort();
   const controller = new AbortController(); loading.detailAbort = controller;
@@ -260,7 +264,7 @@ async function showAt(position) {
   $("detail-position").textContent = `${position + 1} / ${state.total}`;
   draw(); message("加载图片与标注…");
   try {
-    let sample = state.items[position - state.offset];
+    let sample = fresh ? null : state.items[position - state.offset];
     if (!sample) {
       const query = filters(); query.set("offset", position); query.set("limit", 1);
       sample = (await api(`${endpoint}/samples?${query}`, {signal: controller.signal})).items[0];
@@ -280,10 +284,69 @@ async function showAt(position) {
     if (!current()) return;
     if (result.error) throw result.error;
     view.image = result.image; message(""); fit();
-    scheduleNeighbors(position, endpoint, version);
+    await syncInspectorPosition();
   } catch (error) {
     if (error.name !== "AbortError" && current()) message(error.message);
   }
+}
+
+function clearInspectorPosition() {
+  inspectorPositionRequest?.controller.abort(); inspectorPositionRequest = null;
+  state.navigation = null;
+}
+
+function renderInspectorPosition() {
+  const detail = state.detail, navigation = state.navigation;
+  if (!detail || !navigation || navigation.id !== detail.id || navigation.key !== detail.key ||
+      navigation.endpoint !== base() || navigation.filter !== filters().toString()) return;
+  const previous = navigation.insertion - 1;
+  const next = navigation.position === null ? navigation.insertion : navigation.position + 1;
+  $("image-prev").disabled = previous < 0;
+  $("image-next").disabled = next >= navigation.total;
+  $("detail-position").textContent = navigation.position === null ?
+    `${detail.deleted ? "已在草稿中删除" : "已不在当前筛选"} · 剩余 ${navigation.total} 张` :
+    `${navigation.position + 1} / ${navigation.total}`;
+}
+
+// Locate by registered sample ID, including its insertion point after it leaves a filter.
+async function syncInspectorPosition() {
+  const detail = state.detail;
+  if (!detail || !$("image-dialog").open) return null;
+  const endpoint = base(), version = state.detailVersion, query = filters().toString();
+  const id = detail.id, key = detail.key;
+  const requestKey = JSON.stringify([endpoint, version, id, key, query, editor.draft?.revision]);
+  if (inspectorPositionRequest?.key === requestKey) return inspectorPositionRequest.promise;
+  inspectorPositionRequest?.controller.abort();
+  const controller = new AbortController();
+  const current = () => !controller.signal.aborted && endpoint === base() && version === state.detailVersion &&
+    state.detail?.id === id && state.detail.key === key && query === filters().toString() && $("image-dialog").open;
+  const pending = {key: requestKey, controller, promise: null};
+  pending.promise = (async () => {
+    try {
+      const result = await api(`${endpoint}/samples/${id}/position?${query}`, {signal: controller.signal});
+      if (!current() || result.revision < (editor.draft?.revision ?? 0)) return null;
+      state.navigation = {...result, id, key, endpoint, filter: query};
+      state.position = result.position ?? result.insertion;
+      state.total = result.total;
+      renderInspectorPosition();
+      if (view.image) scheduleNeighbors(state.position, endpoint, version);
+      return result;
+    } catch (error) {
+      if (error.name !== "AbortError" && current()) message(error.message);
+      return null;
+    } finally { if (inspectorPositionRequest === pending) inspectorPositionRequest = null; }
+  })();
+  inspectorPositionRequest = pending;
+  return pending.promise;
+}
+
+async function navigateImage(direction) {
+  if (!(await editorBeforeNavigation())) return;
+  if (!state.detail) { await showAt(state.position + direction, {fresh: true}); return; }
+  const current = await syncInspectorPosition();
+  if (!current) return;
+  const target = direction < 0 ? current.insertion - 1 : current.position === null ? current.insertion : current.position + 1;
+  if (target >= 0 && target < current.total) await showAt(target, {fresh: true});
 }
 
 function scheduleNeighbors(position, endpoint, detailVersion) {
@@ -296,7 +359,8 @@ function scheduleNeighbors(position, endpoint, detailVersion) {
       endpoint === base() && $("image-dialog").open && filters().toString() === filterKey;
     try {
       // Look ahead at most one sample in either direction, including across gallery pages.
-      const positions = [position + 1, position - 1].filter((p) => p >= 0 && p < state.total);
+      const next = state.navigation?.position === null ? position : position + 1;
+      const positions = [next, position - 1].filter((p) => p >= 0 && p < state.total);
       for (const neighbor of positions) {
         if (!current()) return;
         let sample = state.items[neighbor - state.offset];
@@ -324,6 +388,7 @@ function renderDetail(detail) {
     if (!detail.annotations.length) $("annotation-list").append(element("p", "muted", "此图片没有有效标注"));
     $("detail-issues").replaceChildren(...detail.issues.map((issue) => element("div", "issue", `${issue.file}${issue.line ? `:${issue.line}` : ""}\n${issue.message}${issue.raw !== null && issue.raw !== undefined ? `\n原始行：${issue.raw}` : ""}`)));
     editorDetail(detail);
+    renderInspectorPosition();
 }
 
 function fit() {
@@ -442,9 +507,9 @@ $("page-prev").addEventListener("click", () => { state.offset = Math.max(0, stat
 $("page-next").addEventListener("click", () => { state.offset += state.limit; refresh(); });
 $("close-detail").addEventListener("click", async () => { if (await editorBeforeNavigation()) $("image-dialog").close(); });
 $("image-dialog").addEventListener("cancel", (event) => { event.preventDefault(); $("close-detail").click(); });
-$("image-dialog").addEventListener("close", () => { loading.stopDetail(); editorPointerCancel(); ++state.detailVersion; view.image = null; state.detail = null; });
-$("image-prev").addEventListener("click", () => showAt(state.position - 1).catch(report));
-$("image-next").addEventListener("click", () => showAt(state.position + (state.detail?.deleted && $("edit-filter").value !== "deleted" ? 0 : 1)).catch(report));
+$("image-dialog").addEventListener("close", () => { clearInspectorPosition(); loading.stopDetail(); editorPointerCancel(); ++state.detailVersion; view.image = null; state.detail = null; });
+$("image-prev").addEventListener("click", () => navigateImage(-1).catch(report));
+$("image-next").addEventListener("click", () => navigateImage(1).catch(report));
 $("fit-image").addEventListener("click", fit);
 $("zoom-in").addEventListener("click", () => zoom(1.25));
 $("zoom-out").addEventListener("click", () => zoom(.8));
@@ -452,6 +517,6 @@ for (const id of ["show-annotations", "show-names"]) $(id).addEventListener("cha
 document.addEventListener("keydown", (event) => {
   if (!$("image-dialog").open || ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) return;
   if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-    event.preventDefault(); showAt(state.position + (event.key === "ArrowLeft" ? -1 : 1)).catch(report);
+    event.preventDefault(); navigateImage(event.key === "ArrowLeft" ? -1 : 1).catch(report);
   }
 });

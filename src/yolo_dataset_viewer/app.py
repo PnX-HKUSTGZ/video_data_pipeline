@@ -16,7 +16,7 @@ from .edit_models import DraftStatus, EditRequest, RevisionRequest
 from .editing import DraftError
 from .exports import ExportPreview, ExportRequest, ExportStatus, RecoveryInfo
 from .models import IndexStatus, LabelState, OpenRequest, SampleDetail, SamplePage, Stats
-from .service import BrowserView, SessionError, ViewerService
+from .service import BrowserView, SamplePosition, SessionError, ViewerService
 
 
 def create_app() -> FastAPI:
@@ -99,6 +99,20 @@ def create_app() -> FastAPI:
         edit_state: Literal["modified", "deleted"] | None = None,
     ) -> SamplePage:
         return service.page(session_id, split, class_id, state, search, offset, limit, edit_state)
+
+    @app.get(
+        "/api/datasets/{session_id}/samples/{sample_id}/position", response_model=SamplePosition
+    )
+    def sample_position(
+        session_id: str,
+        sample_id: int,
+        split: str | None = None,
+        class_id: int | None = None,
+        state: LabelState | None = None,
+        search: str = "",
+        edit_state: Literal["modified", "deleted"] | None = None,
+    ) -> SamplePosition:
+        return service.position(session_id, sample_id, split, class_id, state, search, edit_state)
 
     @app.get("/api/datasets/{session_id}/stats", response_model=Stats)
     def stats(

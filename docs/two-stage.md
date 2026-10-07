@@ -173,3 +173,6 @@ uv run --locked ruff format --check src tests
 负责按类别调度；`inference/litehrnet.py` 负责 MMPose 适配；`roi.py` 负责无模型依赖的几何与筛选。
 `pipeline.py`、`parallel.py` 仅通过有类型的 `InferencePipeline` 接口调用选中的实现。
 权重、视频、数据集和运行记录不提交 Git。
+
+全国赛红蓝双方全部 259 个视频的生成结果和复现命令见
+[全国赛两阶段运行记录](national-two-stage-20261007.md)。

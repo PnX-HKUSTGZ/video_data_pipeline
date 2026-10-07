@@ -21,7 +21,7 @@ def parallel_run(synthetic_run, tmp_path, monkeypatch):
     # 测试进程只继承 CPU 假模型；生产使用 spawn，不继承 CUDA 上下文。
     context = mp.get_context("fork")
     monkeypatch.setattr(parallel.mp, "get_context", lambda _: context)
-    monkeypatch.setattr(parallel, "Detector", detector)
+    monkeypatch.setattr(parallel, "build_pipeline", detector)
     monkeypatch.setattr(parallel, "configure_device", lambda _: "cpu")
     monkeypatch.setattr(parallel, "gpu_snapshot", lambda *_: None)
     return config, detector
@@ -85,7 +85,7 @@ def test_parallel_failure_reaps_workers_and_removes_staging(
         def fail(*_):
             raise RuntimeError("initialization failed")
 
-        monkeypatch.setattr(parallel, "Detector", fail)
+        monkeypatch.setattr(parallel, "build_pipeline", fail)
     else:
         detector.fail_at = 12
     with pytest.raises(RuntimeError, match="GPU worker failed"):

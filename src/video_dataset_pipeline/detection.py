@@ -2,6 +2,7 @@ import math
 from collections.abc import Sequence
 from typing import Literal
 
+from .config import KeypointModelConfig
 from .metadata import SplitInfo
 from .pose import check_keypoint_shape, filter_keypoints
 from .records import (
@@ -13,6 +14,7 @@ from .records import (
     RejectionReason,
     Split,
 )
+from .roi import filter_roi_keypoints
 
 
 def filter_detections(
@@ -23,6 +25,7 @@ def filter_detections(
     confidence: float,
     keypoint_shape: KeypointShape | None = None,
     keypoint_confidence: float = 0.5,
+    keypoint_models: dict[int, KeypointModelConfig] | None = None,
 ) -> tuple[list[Detection], list[RejectedDetection]]:
     """筛选原图像素坐标中的检测框，返回有效检测与带原因的拒绝检测。
 
@@ -34,7 +37,8 @@ def filter_detections(
     accepted: list[Detection] = []
     rejected: list[RejectedDetection] = []
     for detection in detections:
-        check_keypoint_shape(detection.keypoints, keypoint_shape)
+        if keypoint_models is None:
+            check_keypoint_shape(detection.keypoints, keypoint_shape)
         reason: RejectionReason | None = None
         class_id = detection.class_id
         score = detection.confidence
@@ -53,18 +57,26 @@ def filter_detections(
             y1, y2 = max(0, min(height, y1)), max(0, min(height, y2))
             if x2 <= x1 or y2 <= y1:
                 reason = "empty_box"
+        if reason is None and keypoint_models is not None and class_id not in keypoint_models:
+            reason = "unmapped_class"
         if reason:
-            rejected.append(RejectedDetection(class_id, score, box, reason, detection.keypoints))
+            rejected.append(
+                RejectedDetection(class_id, score, box, reason, detection.keypoints, detection.roi)
+            )
         else:
+            check_keypoint_shape(detection.keypoints, keypoint_shape)
             accepted.append(
                 Detection(
                     class_id=class_id,
                     confidence=score,
                     xyxy=(x1, y1, x2, y2),
                     source_xyxy=box,
-                    keypoints=filter_keypoints(
-                        detection.keypoints, width, height, keypoint_confidence
+                    roi=detection.roi,
+                    keypoints=filter_roi_keypoints(
+                        detection.keypoints, detection.roi, keypoint_models[class_id], width, height
                     )
+                    if keypoint_models is not None and detection.keypoints is not None
+                    else filter_keypoints(detection.keypoints, width, height, keypoint_confidence)
                     if detection.keypoints is not None
                     else None,
                     xywhn=(

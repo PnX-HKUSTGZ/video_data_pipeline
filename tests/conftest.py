@@ -48,7 +48,7 @@ def synthetic_run(tmp_path, monkeypatch):
                 return []
             return [RawDetection(0, 0.9, (20, 10, 80, 70))]
 
-    monkeypatch.setattr(pipeline, "Detector", FakeDetector)
+    monkeypatch.setattr(pipeline, "build_pipeline", FakeDetector)
     config = Config(
         input=str(video),
         output=str(tmp_path / "out"),

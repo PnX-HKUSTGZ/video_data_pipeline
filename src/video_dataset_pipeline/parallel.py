@@ -15,8 +15,8 @@ from queue import Empty
 from .config import Config
 from .dataset import export_records, read_records
 from .device import configure_device, gpu_snapshot
+from .inference import InferencePipeline, build_pipeline
 from .metadata import PoseMetadata, RunMetadata, SourceMetadata
-from .model import Detector
 from .pipeline import _cleanup_staging, _infer
 from .records import FrameRecord, Task
 from .util import write_json
@@ -43,7 +43,11 @@ class WorkerError:
 
 
 def _process_source(
-    config: Config, root: Path, run: RunMetadata, source: SourceMetadata, detector: Detector
+    config: Config,
+    root: Path,
+    run: RunMetadata,
+    source: SourceMetadata,
+    detector: InferencePipeline,
 ) -> SourceResult:
     """处理独立来源目录，允许零检测视频；全局训练/验证非空检查留给父进程。"""
     root.mkdir(parents=True)
@@ -95,7 +99,7 @@ def _worker(
         config = replace(config, device=device)
         framework_device = configure_device(device)
         gpu_snapshot(evidence, "before")
-        detector = Detector(config, framework_device)
+        detector = build_pipeline(config, framework_device)
         if detector.names != run["names"]:
             raise ValueError("Loaded detector changed the class mapping")
         while (source := tasks.get()) is not None:

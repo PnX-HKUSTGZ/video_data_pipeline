@@ -1,8 +1,8 @@
 import math
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
-from typing import NotRequired, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
 
 import yaml
 
@@ -10,7 +10,7 @@ from .device import parse_device
 from .util import as_float, as_int, as_list, as_mapping, as_str
 
 
-class ConfigValues(TypedDict):
+class CommonConfigValues(TypedDict):
     input: str | list[str]
     output: str
     model: str
@@ -30,6 +30,94 @@ class ConfigValues(TypedDict):
     smoke_frames: NotRequired[int]
     save_video: NotRequired[bool]
     recursive: NotRequired[bool]
+
+
+class KeypointModelValues(TypedDict):
+    config: str
+    checkpoint: str
+    output_indices: tuple[int, ...]
+    confidence: float
+    in_frame_confidence: float | None
+    crop_margin: float
+    batch_size: int
+
+
+class ConfigValues(CommonConfigValues):
+    pipeline: NotRequired[Literal["single_stage", "two_stage"]]
+    output_keypoints: NotRequired[tuple[str, ...]]
+    keypoint_models: NotRequired[dict[int, KeypointModelValues]]
+
+
+@dataclass(frozen=True)
+class KeypointModelConfig:
+    """一个检测类别使用的 MMPose 模型及其原生点序到导出槽位的映射。"""
+
+    config: str
+    checkpoint: str
+    output_indices: tuple[int, ...]
+    confidence: float = 0.1
+    in_frame_confidence: float | None = None
+    crop_margin: float = 0.0
+    batch_size: int = 1
+
+    def __post_init__(self) -> None:
+        """热图阈值不是概率上界；检查有限数、ROI 范围和批大小。"""
+        if not self.config or not self.checkpoint:
+            raise ValueError("Keypoint model requires config and checkpoint")
+        if not math.isfinite(self.confidence) or self.confidence < 0:
+            raise ValueError("Heatmap confidence must be finite and nonnegative")
+        if self.in_frame_confidence is not None and (
+            not math.isfinite(self.in_frame_confidence) or not 0 <= self.in_frame_confidence <= 1
+        ):
+            raise ValueError("in_frame_confidence must be in [0,1] or null")
+        if not math.isfinite(self.crop_margin) or self.crop_margin < 0:
+            raise ValueError("crop_margin must be finite and nonnegative")
+        if as_int(self.batch_size) <= 0:
+            raise ValueError("Keypoint batch_size must be positive")
+        if not self.output_indices or len(set(self.output_indices)) != len(self.output_indices):
+            raise ValueError("output_indices must be nonempty and unique")
+        if any(as_int(i) < 0 for i in self.output_indices):
+            raise ValueError("output_indices must be nonnegative integers")
+
+
+def parse_keypoint_models(
+    value: object, *, resolve_paths: bool = False
+) -> dict[int, KeypointModelConfig]:
+    """读取 YAML/JSON 类别映射；离线数据校验不要求原权重仍存在。"""
+    if not isinstance(value, dict):
+        raise TypeError("keypoint_models must be a class ID mapping")
+    result: dict[int, KeypointModelConfig] = {}
+    for key, raw in cast(dict[object, object], value).items():
+        if isinstance(key, str) and key.isascii() and key.isdecimal():
+            key = int(key)
+        index = as_int(key)
+        if index < 0 or index in result:
+            raise ValueError("Keypoint class IDs must be unique nonnegative integers")
+        data = as_mapping(raw)
+        if unknown := set(data) - {f.name for f in fields(KeypointModelConfig)}:
+            raise ValueError(f"Unknown keypoint model keys: {sorted(unknown)}")
+        if missing := {"config", "checkpoint", "output_indices"} - set(data):
+            raise ValueError(f"Missing keypoint model fields: {sorted(missing)}")
+        paths = [as_str(data[name]) for name in ("config", "checkpoint")]
+        if resolve_paths:
+            paths = [str(Path(p).expanduser().resolve()) for p in paths]
+            for path in paths:
+                if not Path(path).is_file():
+                    raise ValueError(f"Keypoint model file missing: {path}")
+        indices = data["output_indices"]
+        items = list(indices) if isinstance(indices, tuple) else as_list(indices)
+        result[index] = KeypointModelConfig(
+            config=paths[0],
+            checkpoint=paths[1],
+            output_indices=tuple(as_int(i) for i in items),
+            confidence=as_float(data.get("confidence", 0.1)),
+            in_frame_confidence=None
+            if data.get("in_frame_confidence") is None
+            else as_float(data["in_frame_confidence"]),
+            crop_margin=as_float(data.get("crop_margin", 0.0)),
+            batch_size=as_int(data.get("batch_size", 1)),
+        )
+    return result
 
 
 @dataclass(frozen=True)
@@ -55,6 +143,9 @@ class Config:
     smoke_frames: int = 0
     save_video: bool = False
     recursive: bool = False
+    pipeline: Literal["single_stage", "two_stage"] = "single_stage"
+    output_keypoints: tuple[str, ...] = ()
+    keypoint_models: dict[int, KeypointModelConfig] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """校验采样、阈值和图像参数的范围，并将设备编号字符串转换为整数。"""
@@ -80,7 +171,9 @@ class Config:
             raise ValueError("end must be finite and greater than start")
         if not 0 < self.confidence <= 1 or not 0 < self.iou <= 1:
             raise ValueError("confidence and iou must be in (0, 1]")
-        if not 0 <= self.keypoint_confidence <= 1:
+        if self.keypoint_confidence < 0 or (
+            self.pipeline == "single_stage" and self.keypoint_confidence > 1
+        ):
             raise ValueError("keypoint_confidence must be in [0, 1]")
         if not 0 < self.train_fraction < 1:
             raise ValueError("train_fraction must be in (0, 1)")
@@ -97,6 +190,21 @@ class Config:
                 "save_video cannot be combined with smoke_frames; use start/end instead"
             )
         object.__setattr__(self, "device", parse_device(self.device))
+        if self.pipeline not in ("single_stage", "two_stage"):
+            raise ValueError("pipeline must be single_stage or two_stage")
+        if self.pipeline == "single_stage":
+            if self.output_keypoints or self.keypoint_models:
+                raise ValueError("Keypoint model mappings require pipeline: two_stage")
+        else:
+            if not self.keypoint_models or not self.output_keypoints:
+                raise ValueError("two_stage requires keypoint_models and output_keypoints")
+            if len(set(self.output_keypoints)) != len(self.output_keypoints) or any(
+                not as_str(p).strip() for p in self.output_keypoints
+            ):
+                raise ValueError("output_keypoints must be unique nonempty names")
+            for index, head in self.keypoint_models.items():
+                if as_int(index) < 0 or max(head.output_indices) >= len(self.output_keypoints):
+                    raise ValueError("Class ID or keypoint output index out of range")
 
     def to_dict(self) -> ConfigValues:
         """返回包含默认值在内的生效配置，供运行配置和元数据写入使用。"""
@@ -120,16 +228,16 @@ def load_config(path: str | Path, overrides: Mapping[str, object] | None = None)
     if isinstance(raw_input, str):
         if not raw_input.strip():
             raise ValueError("input contains an empty path")
-        data["input"] = str(Path(raw_input).resolve())
+        data["input"] = str(Path(raw_input).expanduser().resolve())
     else:
         inputs = [as_str(p) for p in as_list(raw_input)]
         if not inputs or any(not p.strip() for p in inputs):
             raise ValueError("input must contain nonempty paths")
-        data["input"] = [str(Path(p).resolve()) for p in inputs]
+        data["input"] = [str(Path(p).expanduser().resolve()) for p in inputs]
     for key in ("output", "model", "model_yaml"):
         if not data.get(key):
             raise ValueError(f"Missing required config field: {key}")
-        data[key] = str(Path(as_str(data[key])).resolve())
+        data[key] = str(Path(as_str(data[key])).expanduser().resolve())
     for key in (
         "sample_fps",
         "start",
@@ -148,7 +256,22 @@ def load_config(path: str | Path, overrides: Mapping[str, object] | None = None)
             data[key] = as_int(data[key])
     if "device" in data:
         data["device"] = parse_device(data["device"])
-    config = Config(**cast(ConfigValues, data))
+    mode = data.pop("pipeline", "single_stage")
+    if mode not in ("single_stage", "two_stage"):
+        raise ValueError("pipeline must be single_stage or two_stage")
+    points = tuple(as_str(p) for p in as_list(data.pop("output_keypoints", [])))
+    heads = parse_keypoint_models(data.pop("keypoint_models", {}), resolve_paths=True)
+    if overrides is not None and overrides.get("keypoint_confidence") is not None:
+        heads = {
+            i: replace(h, confidence=as_float(overrides["keypoint_confidence"]))
+            for i, h in heads.items()
+        }
+    config = Config(
+        **cast(CommonConfigValues, data),
+        pipeline=mode,
+        output_keypoints=points,
+        keypoint_models=heads,
+    )
     for key in ("model", "model_yaml"):
         if not Path(getattr(config, key)).is_file():
             raise ValueError(f"Configured {key} file missing: {getattr(config, key)}")

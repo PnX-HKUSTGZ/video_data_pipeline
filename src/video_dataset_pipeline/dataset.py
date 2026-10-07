@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import yaml
 
+from .config import parse_keypoint_models
 from .detection import candidate_status, label_text, split_selected_frames
 from .inference_video import validate_inference_video
 from .metadata import (
@@ -23,7 +24,8 @@ from .metadata import (
     ValidationResult,
 )
 from .pose import check_keypoint_shape, filter_keypoints, parse_pose_metadata
-from .records import BGRImage, FrameRecord, Split
+from .records import BGRImage, Detection, FrameRecord, RejectedDetection, Split
+from .roi import expand_roi, filter_roi_keypoints
 from .util import as_float, as_int, as_list, as_mapping, as_str, atomic_bytes, read_json, write_json
 
 SPLITS: tuple[Split, Split] = ("train", "val")
@@ -321,7 +323,7 @@ def _validate_sources(
     不重新扫描输入目录，也不要求原视频仍然存在，校验以本次固定清单为准。
     各视频只在自身时间轴内检查顺序、处理范围及保存视频的时间戳。
     """
-    modern = run["schema_version"] == 6
+    modern = run["schema_version"] in (6, 7)
     sources = (
         [as_mapping(v) for v in as_list(run["videos"])]
         if modern
@@ -438,10 +440,26 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
         ("pose", 5),
         ("detect", 6),
         ("pose", 6),
+        ("pose", 7),
     ):
         raise ValueError("Unsupported task/schema_version combination")
+    two_stage = run["schema_version"] == 7
+    heads = parse_keypoint_models(config.get("keypoint_models", {})) if two_stage else {}
+    if two_stage and (config.get("pipeline") != "two_stage" or not heads):
+        raise ValueError("Schema 7 requires two_stage configuration")
     pose = parse_pose_metadata(run["pose"], len(names)) if task == "pose" else None
     shape = pose["source_kpt_shape"] if pose is not None else None
+    if two_stage:
+        configured_points = [as_str(p) for p in as_list(config["output_keypoints"])]
+        if shape != (len(configured_points), 3) or not configured_points:
+            raise ValueError("Output keypoint layout disagrees with pose metadata")
+        if pose is None or pose.get("kpt_names") != {i: configured_points for i in names}:
+            raise ValueError("Output keypoint names disagree with pose metadata")
+        if any(
+            i not in names or max(h.output_indices) >= len(configured_points)
+            for i, h in heads.items()
+        ):
+            raise ValueError("Keypoint mapping is out of range")
     if pose is not None:
         if data.get("kpt_shape") != [pose["source_kpt_shape"][0], 3]:
             raise ValueError("Dataset kpt_shape disagrees with run metadata")
@@ -463,6 +481,14 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
     assignments = _validate_sources(root, run, config, records)
     for record in records:
         check_record_files(root, record)
+        if two_stage:
+            instances: list[Detection | RejectedDetection] = [
+                *record.detections,
+                *record.rejected_detections,
+            ]
+            indices = [d.roi.detection_index for d in instances if d.roi is not None]
+            if len(indices) != len(set(indices)) or any(i >= len(instances) for i in indices):
+                raise ValueError(f"Invalid ROI detection indices at frame {record.frame_index}")
         expected_split = assignments.get((record.source_id, record.frame_index))
         status = candidate_status(record.detections)
         expected_status = (
@@ -480,9 +506,29 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
             )
             check_keypoint_shape(raw_points, shape)
             if raw_points is not None:
-                expected_points = filter_keypoints(
-                    raw_points, record.width, record.height, as_float(config["keypoint_confidence"])
-                )
+                if two_stage:
+                    head = heads.get(detection.class_id)
+                    if head is None or detection.roi is None:
+                        raise ValueError("Accepted pose detection has no configured ROI head")
+                    if detection.roi.xyxy != expand_roi(
+                        detection.xyxy, record.width, record.height, head.crop_margin
+                    ):
+                        raise ValueError("ROI geometry differs from configured margin")
+                    point_names = as_list(config["output_keypoints"])
+                    if [p.name for p in detection.roi.keypoints] != [
+                        point_names[i] for i in head.output_indices
+                    ]:
+                        raise ValueError("Native point names disagree with output_indices")
+                    expected_points = filter_roi_keypoints(
+                        raw_points, detection.roi, head, record.width, record.height
+                    )
+                else:
+                    expected_points = filter_keypoints(
+                        raw_points,
+                        record.width,
+                        record.height,
+                        as_float(config["keypoint_confidence"]),
+                    )
                 for actual, expected in zip(
                     detection.keypoints or (), expected_points, strict=True
                 ):
@@ -495,7 +541,8 @@ def validate_dataset(root: str | Path, ultralytics_check: bool = True) -> Valida
                             f"Keypoint filtering mismatch at frame {record.frame_index}"
                         )
         for rejected in record.rejected_detections:
-            check_keypoint_shape(rejected.keypoints, shape)
+            if not two_stage or rejected.keypoints is not None:
+                check_keypoint_shape(rejected.keypoints, shape)
         if record.split != expected_split or record.status != expected_status:
             raise ValueError("Manifest split or inclusion rule mismatch")
         if record.status != "included":

@@ -23,17 +23,23 @@ type RejectionReason = Literal[
     "invalid_confidence",
     "below_confidence",
     "empty_box",
+    "unmapped_class",
 ]
 
 
 type KeypointRejectionReason = Literal[
-    "nonfinite_coordinates", "invalid_confidence", "below_keypoint_confidence", "outside_image"
+    "nonfinite_coordinates",
+    "invalid_confidence",
+    "below_keypoint_confidence",
+    "outside_image",
+    "not_applicable",
+    "below_in_frame_confidence",
 ]
 
 
 @dataclass(frozen=True)
 class RawKeypoint:
-    """Ultralytics 返回的原图像素点；二维模型没有单点置信度，记为 None。"""
+    """模型返回的原图像素点；二维模型没有单点置信度，记为 None。"""
 
     xy: Point
     confidence: float | None
@@ -84,6 +90,8 @@ class Keypoint:
             "invalid_confidence",
             "below_keypoint_confidence",
             "outside_image",
+            "not_applicable",
+            "below_in_frame_confidence",
         ):
             raise ValueError("Invalid keypoint rejection reason")
         return cls(
@@ -95,6 +103,69 @@ class Keypoint:
 
 
 @dataclass(frozen=True)
+class NativeKeypoint:
+    """LiteHRNet 原生点序：原图坐标、相对 ROI 坐标、热图分数及可选在框分数。"""
+
+    name: str
+    xy: Point
+    roi_xy: Point
+    score: float
+    in_frame_score: float | None
+
+    def to_dict(self) -> dict[str, object]:
+        """分数保持原值；热图分数可以超过 1。"""
+        return {
+            "name": self.name,
+            "xy": list(self.xy),
+            "roi_xy": list(self.roi_xy),
+            "score": self.score,
+            "in_frame_score": self.in_frame_score,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> NativeKeypoint:
+        """显式解析 JSON 边界，保留非法预测供筛选诊断。"""
+        data = as_mapping(value)
+        return cls(
+            as_str(data["name"]),
+            _read_point(data["xy"]),
+            _read_point(data["roi_xy"]),
+            as_float(data["score"]),
+            None if data["in_frame_score"] is None else as_float(data["in_frame_score"]),
+        )
+
+
+@dataclass(frozen=True)
+class ROIResult:
+    """两阶段的实例对应关系；xyxy 是传给原生仿射变换的扩展、裁剪后的 ROI。"""
+
+    detection_index: int
+    xyxy: Box
+    keypoints: tuple[NativeKeypoint, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        """只保存数值，不重复保存 ROI 图像。"""
+        return {
+            "detection_index": self.detection_index,
+            "xyxy": list(self.xyxy),
+            "keypoints": [p.to_dict() for p in self.keypoints],
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> ROIResult:
+        """恢复 schema 7 的原生推理信息。"""
+        data = as_mapping(value)
+        index = as_int(data["detection_index"])
+        if index < 0:
+            raise ValueError("ROI detection_index must be nonnegative")
+        return cls(
+            index,
+            _read_box(data["xyxy"]),
+            tuple(NativeKeypoint.from_dict(p) for p in as_list(data["keypoints"])),
+        )
+
+
+@dataclass(frozen=True)
 class RawDetection:
     """模型输出的检测结果；xyxy 是原图像素坐标中的 (左, 上, 右, 下)。"""
 
@@ -102,6 +173,7 @@ class RawDetection:
     confidence: float
     xyxy: Box
     keypoints: tuple[RawKeypoint, ...] | None = None
+    roi: ROIResult | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +186,7 @@ class Detection:
     source_xyxy: Box
     xywhn: Box
     keypoints: tuple[Keypoint, ...] | None = None
+    roi: ROIResult | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +198,7 @@ class RejectedDetection:
     xyxy: Box
     reason: RejectionReason
     keypoints: tuple[RawKeypoint, ...] | None = None
+    roi: ROIResult | None = None
 
 
 @dataclass
@@ -147,7 +221,7 @@ class FrameRecord:
     source_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        """转换为兼容 schema 4/5/6 的字段，框写为数组，省略未设置的产物路径。
+        """转换为兼容 schema 4/5/6/7 的字段，框写为数组，省略未设置的产物路径。
 
         split 即使为 None 也保留；preview_reasons 仅在存在预览时写入，
         使 JSON/JSONL 结构与已有数据集兼容。
@@ -162,6 +236,7 @@ class FrameRecord:
             "detections": [
                 {
                     "class_id": d.class_id,
+                    **({"roi": d.roi.to_dict()} if d.roi is not None else {}),
                     "confidence": d.confidence,
                     "xyxy": list(d.xyxy),
                     "source_xyxy": list(d.source_xyxy),
@@ -177,6 +252,7 @@ class FrameRecord:
             "rejected_detections": [
                 {
                     "class_id": d.class_id,
+                    **({"roi": d.roi.to_dict()} if d.roi is not None else {}),
                     "confidence": d.confidence,
                     "xyxy": list(d.xyxy),
                     "reason": d.reason,
@@ -205,7 +281,7 @@ class FrameRecord:
 
     @classmethod
     def from_dict(cls, value: object) -> FrameRecord:
-        """从 schema 4/5 对象恢复记录，并检查必要字段、值类型及框的长度。
+        """从 schema 4/5/6/7 对象恢复记录，并检查必要字段、值类型及框的长度。
 
         这里只校验记录结构；图像配对和划分等规则由数据集校验负责。
         非有限数值仍可读取，以保留被拒绝检测的诊断信息；文件行号由调用方补充。
@@ -223,6 +299,7 @@ class FrameRecord:
             detections.append(
                 Detection(
                     class_id=as_int(detection["class_id"]),
+                    roi=ROIResult.from_dict(detection["roi"]) if "roi" in detection else None,
                     confidence=as_float(detection["confidence"]),
                     xyxy=_read_box(detection["xyxy"]),
                     source_xyxy=_read_box(detection["source_xyxy"]),
@@ -242,11 +319,13 @@ class FrameRecord:
                 "invalid_confidence",
                 "below_confidence",
                 "empty_box",
+                "unmapped_class",
             ):
                 raise ValueError("Invalid rejection reason")
             rejected.append(
                 RejectedDetection(
                     class_id=as_int(detection["class_id"]),
+                    roi=ROIResult.from_dict(detection["roi"]) if "roi" in detection else None,
                     confidence=as_float(detection["confidence"]),
                     xyxy=_read_box(detection["xyxy"]),
                     reason=reason,

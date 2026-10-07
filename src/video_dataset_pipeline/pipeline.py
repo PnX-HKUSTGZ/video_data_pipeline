@@ -23,10 +23,11 @@ from .dataset import (
 )
 from .detection import candidate_status, filter_detections
 from .device import configure_device, gpu_snapshot
+from .inference import InferencePipeline, build_pipeline
 from .inference_video import InferenceVideoWriter
 from .inputs import discover_videos
 from .metadata import DecodeStats, RunMetadata, RunReport, SourceMetadata, SourceReport
-from .model import Detector, load_model_names
+from .model_metadata import load_model_names
 from .records import FrameRecord
 from .util import atomic_bytes, write_json
 from .video import VideoFrames, probe_video
@@ -39,7 +40,7 @@ def _infer(
     root: Path,
     run: RunMetadata,
     source: SourceMetadata,
-    detector: Detector,
+    detector: InferencePipeline,
     frames: VideoFrames,
     records: list[FrameRecord],
     completed_samples: int,
@@ -85,6 +86,7 @@ def _infer(
                     config.confidence,
                     pose["source_kpt_shape"] if pose is not None else None,
                     config.keypoint_confidence,
+                    config.keypoint_models if config.pipeline == "two_stage" else None,
                 )
                 record = FrameRecord(
                     frame_index=index,
@@ -217,7 +219,7 @@ def run_pipeline(config: Config, devices: list[int] | None = None) -> RunReport:
         decoders.append(frames)
     root.mkdir(parents=True, exist_ok=True)
     run: RunMetadata = {
-        "schema_version": 6,
+        "schema_version": 7 if config.pipeline == "two_stage" else 6,
         "run_id": uuid4().hex,
         "config": config.to_dict(),
         "videos": videos,
@@ -253,7 +255,7 @@ def run_pipeline(config: Config, devices: list[int] | None = None) -> RunReport:
             device = configure_device(config.device)
             device_configured = True
             gpu_snapshot(root, "before")
-            detector = Detector(config, device)
+            detector = build_pipeline(config, device)
             if detector.names != names:
                 raise ValueError("Loaded detector changed the class mapping")
             run["task"] = detector.task

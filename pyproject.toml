@@ -28,12 +28,21 @@ dependencies = [
 [project.scripts]
 video-dataset = "video_dataset_pipeline.cli:main"
 yolo-viewer = "yolo_dataset_viewer.cli:main"
+vlm-correct = "vlm_correct_pipeline.cli:main"
 
 [project.optional-dependencies]
 viewer = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "Pillow>=11,<13"]
+vlm = ["openai>=2,<3", "python-dotenv>=1,<2", "pydantic>=2,<3", "Pillow>=11,<13"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/video_dataset_pipeline", "src/yolo_dataset_viewer"]
+packages = ["src/video_dataset_pipeline", "src/yolo_dataset_viewer", "src/vlm_correct_pipeline"]
+
+[tool.hatch.build]
+exclude = [
+  "src/vlm_correct_pipeline/.env",
+  "src/vlm_correct_pipeline/.checks/**",
+  "src/vlm_correct_pipeline/config.local.yaml",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -82,7 +91,7 @@ line-length = 100
 [tool.mypy]
 plugins = ["pydantic.mypy"]
 python_version = "3.12"
-files = ["src/video_dataset_pipeline", "src/yolo_dataset_viewer"]
+files = ["src/video_dataset_pipeline", "src/yolo_dataset_viewer", "src/vlm_correct_pipeline"]
 strict = true
 disallow_any_explicit = true
 

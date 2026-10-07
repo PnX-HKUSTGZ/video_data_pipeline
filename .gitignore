@@ -13,3 +13,4 @@ dist/
 *.log
 *.tmp
 .env
+outputs/vlm_correct/

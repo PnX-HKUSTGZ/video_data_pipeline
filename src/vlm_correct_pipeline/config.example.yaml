@@ -1,0 +1,47 @@
+api:
+  env_file: .env
+  base_url_env: BASE_URL
+  api_key_env: API_KEY
+  model: gpt-6-astra
+  timeout_seconds: 120
+  max_output_tokens: 8192
+  stream: true
+dataset:
+  source: ../../datasets/to_annotate/data.yaml
+  names:
+    0: pillar
+    1: exchange
+  input_task: detect
+  source_rounding_tolerance: 0
+references:
+  - image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/front.jpg
+    label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/front.txt
+    description: 正面权威样例，pillar 是移动兑换标记，exchange 框包含标记和科技核心整体。
+  - image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/left_45.jpg
+    label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/left_45.txt
+    description: 左侧 45 度权威样例。
+  - image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/right_45.jpg
+    label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/right_45.txt
+    description: 右侧 45 度权威样例。
+  - image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/up_45.jpg
+    label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/up_45.txt
+    description: 上方 45 度权威样例。
+  - image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/val/down_45.jpg
+    label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/val/down_45.txt
+    description: 下方 45 度权威样例；源数据的 val 划分在本任务中同样作为参考。
+annotation_rules: |
+  类别 0 pillar 是移动兑换标记，类别 1 exchange 是科技核心整体。
+  exchange 的框包含科技核心及其移动标记，允许与 pillar 框嵌套，不能将二者视为重复框删除。
+  按可见目标轮廓取紧致的轴对齐框，遵循五视角权威样例的分割掩码边界标准。
+  不根据背景或样例中的固定位置臆造目标；只有确认整图没有上述目标时才标记为空。
+  无法可靠判断类别、目标存在性或遮挡后的可见边界时，提交待复核。
+run:
+  image_concurrency: 1
+  max_model_calls: 30
+  max_retries: 3
+  max_consecutive_api_errors: 3
+image_max_edge: 2048
+image_format: jpeg
+jpeg_quality: 95
+output:
+  directory: ../../outputs/vlm_correct/example_run

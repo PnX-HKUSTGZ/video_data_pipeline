@@ -6,7 +6,7 @@ output: datasets/generated/rm26_two_stage/national_20261007
 model: models/hkust/detector/best.pt
 model_yaml: models/hkust/detector/metadata.yaml
 sample_fps: 2.0
-confidence: 0.5
+confidence: 0.8
 iou: 0.7
 imgsz: 640
 batch_size: 8
@@ -20,7 +20,7 @@ keypoint_models:
     config: models/hkust/marker/inference.py
     checkpoint: models/hkust/marker/checkpoint.pth
     output_indices: [0, 1, 2, 3, 4]
-    confidence: 0.1
+    confidence: 0.5
     in_frame_confidence: null
     crop_margin: 0.0
     batch_size: 1
@@ -28,7 +28,7 @@ keypoint_models:
     config: models/hkust/station/inference.py
     checkpoint: models/hkust/station/checkpoint.pth
     output_indices: [5, 6, 7, 8, 9, 10, 11]
-    confidence: 0.1
+    confidence: 0.5
     in_frame_confidence: null
     crop_margin: 0.0
     batch_size: 1

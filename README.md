@@ -1,14 +1,17 @@
 # 视频 → YOLO 检测 / 关键点数据集
 
-使用指定 RM26 工程机器人模型处理视频并生成 **伪标签**。支持 YOLO 检测和 YOLO pose 关键点格式；模型生成流程无需先转码视频，也不包含训练。
+使用可配置的预训练模型处理视频并生成 **伪标签**。支持 YOLO 检测和 YOLO pose 关键点格式；模型生成流程无需先转码视频，也不包含训练。
 
 检测模式使用 `configs/rm26_exchange.yaml`；关键点模式使用 `configs/rm26_exchange_pose.yaml`，详见 [YOLO pose 使用与验证](docs/pose.md)。多个视频或目录可合并生成一个数据集，示例为 `configs/rm26_exchange_multi.yaml`，详见 [多视频输入与验证](docs/multi-video.md)。
 
+两阶段 YOLO ROI + LiteHRNet 使用 `configs/rm26_two_stage.yaml`，与一阶段共用 CLI；模型和类别映射由 YAML 指定，详见 [两阶段使用与验证](docs/two-stage.md)。
+
 ## 环境
 
-Linux，Python 3.12，系统需提供 `ffprobe`；可选下载命令使用 `curl`。CUDA 推理使用支持 CUDA 12.8 的 NVIDIA 驱动。依赖全部由 uv 管理：
+Linux，Python 3.12，系统需提供 C/C++ 编译器和 `ffprobe`；可选下载命令使用 `curl`。CUDA 推理使用支持 CUDA 12.8 的 NVIDIA 驱动。依赖全部由 uv 管理：
 
 ```bash
+bash scripts/setup_env.sh  # 首次安装：构建匹配当前 Torch/NumPy 的原生依赖
 uv sync --locked
 uv run --locked video-dataset --help
 ```
@@ -29,7 +32,7 @@ uv run --locked video-dataset download-model --endpoint https://hf-mirror.com
 - revision：`afab41a8b61c399bf71480f0fd52352ed660b994`
 - 权重：`models/RM26_engineer_exchange_model/yolo/v10.12/best.pt`
 - 类别来自权重和发布元数据，必须一致：`0: pillar`、`1: exchange`。
-- 发布的纯检测模型实际为 **YOLO26s**；YOLO11 训练可以读取其生成的数据集。姿态模型使用独立的 pose 配置；LiteHR 权重不参与本流程。
+- 发布的纯检测模型实际为 **YOLO26s**；YOLO11 训练可以读取其生成的数据集。一阶段姿态模型使用独立的 pose 配置；LiteHRNet 使用两阶段配置。
 
 这是可选的便捷下载命令，仅下载权重和类别 YAML；已有文件直接复用。下载不加锁，不生成额外的模型清单，也不进行哈希校验。下载失败会清理临时文件，下次从头下载。模型也可以自行准备，启动时只读取配置中的两个本地文件：
 
@@ -117,7 +120,7 @@ uv run --locked video-dataset run --config configs/rm26_exchange.yaml \
   COMPLETE.json            # 只有完整数据集校验通过后才存在
 ```
 
-新生成数据使用 schema 6，图片与标签以“来源编号_视频文件名_f帧号”命名，例如 `v0001_recvlnoyv3arV6_红方工程第一视角_f00000000.jpg`。帧记录携带 `source_id`，帧号和时间戳保留源视频含义；旧 schema 4/5 数据集仍可校验。
+一阶段新生成数据使用 schema 6，两阶段使用 schema 7，图片与标签以“来源编号_视频文件名_f帧号”命名，例如 `v0001_recvlnoyv3arV6_红方工程第一视角_f00000000.jpg`。帧记录携带 `source_id`，帧号和时间戳保留源视频含义；旧 schema 4/5 数据集仍可校验。
 
 检测模式每个标签严格为 `class_id x_center y_center width height`，坐标以原图宽高归一化到 `[0,1]`。置信度仅保存在元数据，不写入训练标签。默认不收录没有有效检测框的帧，这些帧可能存在漏检，不能直接视为负样本。
 
@@ -237,7 +240,7 @@ uv run --locked ruff format --check src tests
 
 `metadata.py` 使用 `TypedDict` 描述视频、划分、运行状态和报告，运行时仍是普通字典。`FrameRecord.to_dict/from_dict` 仅用于 JSON/JSONL 边界转换，检测模式保留 schema 4 的字段、坐标数组和可选字段省略规则；pose 使用 schema 5，新增强类型关键点字段，已有数据集无需迁移。
 
-mypy 对整个核心包启用严格检查并禁止显式 `Any`，开发依赖由 uv 锁定。JSON/YAML 和第三方返回值在读取处进行类型收窄；唯一的局部导入忽略用于尚未提供 `py.typed` 标记的 `torchvision.ops`。PyTorch/Ultralytics 继续在设备配置后延迟导入。
+mypy 对整个核心包启用严格检查并禁止显式 `Any`，开发依赖由 uv 锁定。JSON/YAML 和第三方返回值在读取处进行类型收窄；局部类型忽略仅用于未提供类型标记的 TorchVision/MMPose 导入及自定义热图头的无类型基类。PyTorch/Ultralytics 继续在设备配置后延迟导入。
 
 2026-10-05 类型重构回归：48 个测试及上述开发检查通过。使用当前配置、GPU4 对整段视频重新生成：
 

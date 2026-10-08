@@ -89,7 +89,9 @@ def main() -> int:
             if names is None:
                 names = discover(config, base).names
             context, _ = references(config, base, names)
-            result = probe(backend, cancel=stop, reference_context=context)
+            result = probe(
+                backend, cancel=stop, reference_context=context, max_retries=config.run.max_retries
+            )
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         report = run(config, base, backend, endpoint_identity=auth.base_url, cancel=stop)

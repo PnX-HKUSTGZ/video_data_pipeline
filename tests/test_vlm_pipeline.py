@@ -835,3 +835,44 @@ def test_partial_stream_disconnect_is_retryable_and_never_exposes_draft_tool():
     with pytest.raises(APIProblem, match="connection") as error:
         backend.respond([], tool_definitions())
     assert error.value.retryable and "private" not in str(error.value)
+
+
+def test_coordinate_grid_preserves_raw_image_and_full_image_crop_coordinates():
+    with Image.new("RGB", (400, 200), "black") as source:
+        plain, plain_meta = observe(
+            source, [], {0: "target"}, 400, region=[0.2, 0.3, 0.6, 0.8], encoding="png"
+        )
+        grid, grid_meta = observe(
+            source,
+            [],
+            {0: "target"},
+            400,
+            region=[0.2, 0.3, 0.6, 0.8],
+            encoding="png",
+            coordinate_grid=True,
+        )
+    assert grid[1] == plain[1]
+    assert grid[3] != plain[3]
+    assert grid_meta["crop_bbox"] == plain_meta["crop_bbox"]
+    assert 0.4 in grid_meta["grid_ticks"]["x"] and 0.5 in grid_meta["grid_ticks"]["y"]
+    assert min(grid_meta["grid_ticks"]["x"]) >= 0.2 and max(grid_meta["grid_ticks"]["x"]) <= 0.6
+    assert min(grid_meta["grid_ticks"]["y"]) >= 0.3 and max(grid_meta["grid_ticks"]["y"]) <= 0.8
+
+
+@pytest.mark.parametrize("retries", [0, 2])
+def test_probe_respects_configured_retry_limit(retries):
+    class FastCancel(Event):
+        def wait(self, timeout=None):
+            return False
+
+    class UnavailableBackend:
+        calls = 0
+
+        def respond(self, history, tools, *, forced_tool=None):
+            self.calls += 1
+            raise APIProblem("temporary gateway failure", retryable=True)
+
+    backend = UnavailableBackend()
+    with pytest.raises(APIProblem, match="gateway"):
+        probe(backend, cancel=FastCancel(), max_retries=retries)
+    assert backend.calls == retries + 1

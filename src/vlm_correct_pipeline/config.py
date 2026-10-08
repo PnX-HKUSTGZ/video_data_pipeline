@@ -70,6 +70,7 @@ class Config(StrictModel):
     image_max_edge: int = Field(default=2048, ge=256, le=8192)
     image_format: Literal["jpeg", "png"] = "jpeg"
     jpeg_quality: int = Field(default=95, ge=1, le=100)
+    coordinate_grid: bool = False
 
     @field_validator("annotation_rules")
     @classmethod

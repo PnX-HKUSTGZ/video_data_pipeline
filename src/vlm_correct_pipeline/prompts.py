@@ -19,6 +19,10 @@ ALL bounding boxes and inspect_region requests use FULL IMAGE normalized xyxy in
 Cropping and display resizing NEVER change the editing coordinate system.
 Call exactly ONE tool per response, then inspect its feedback before another operation.
 After an edit, inspect the updated image before confirming completion.
+When a coordinate grid is shown, read its full-image x/y labels to place box edges.
+Before finishing, compare all four box edges with the visible object's extrema in
+the latest rendered view. Correct boxes that include unnecessary background or cut
+off visible target parts. Keep an existing box when its boundaries are already correct.
 Use finish_annotation only for a reviewed, nonempty annotation. Missing or empty input
 labels do not establish a negative example. Use mark_empty only when you explicitly
 confirm that no task objects exist anywhere in the target image.
@@ -65,6 +69,7 @@ def references(
                 config.image_max_edge,
                 encoding=config.image_format,
                 jpeg_quality=config.jpeg_quality,
+                coordinate_grid=config.coordinate_grid,
             )
         finally:
             image.close()

@@ -43,5 +43,6 @@ run:
 image_max_edge: 2048
 image_format: jpeg
 jpeg_quality: 95
+coordinate_grid: false
 output:
   directory: ../../outputs/vlm_correct/example_run

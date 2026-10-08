@@ -112,6 +112,7 @@ def annotate(
         config.image_max_edge,
         encoding=config.image_format,
         jpeg_quality=config.jpeg_quality,
+        coordinate_grid=config.coordinate_grid,
     )
     initial = tools.snapshot(role="editable_target", **metadata)
     history = [*prefix, message([text_item(json.dumps(initial, ensure_ascii=False)), *content])]
@@ -148,6 +149,7 @@ def annotate(
                         region=result.region,
                         encoding=config.image_format,
                         jpeg_quality=config.jpeg_quality,
+                        coordinate_grid=config.coordinate_grid,
                     )
                     result = ToolResult(
                         json_object({**result.payload, **metadata}),
@@ -189,11 +191,14 @@ def probe(
     cancel: Event | None = None,
     reference_context: list[JSONObject] | None = None,
     recorder: Recorder | None = None,
+    max_retries: int = 3,
 ) -> JSONObject:
     """Verify two-image vision, strict functions, and a tool-result/new-image continuation."""
     stop = cancel or Event()
     usage = Usage()
-    budget = Budget(RunConfig(max_model_calls=6, max_retries=1), usage)
+    budget = Budget(
+        RunConfig(max_model_calls=2 * (max_retries + 1), max_retries=max_retries), usage
+    )
     events: list[JSONObject] = []
 
     def record(value: JSONObject) -> None:

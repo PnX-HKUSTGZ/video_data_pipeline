@@ -209,6 +209,7 @@ def run(
                         cancel=stop,
                         reference_context=reference_messages,
                         recorder=record_probe,
+                        max_retries=config.run.max_retries,
                     )
                 except BaseException:
                     write_json(

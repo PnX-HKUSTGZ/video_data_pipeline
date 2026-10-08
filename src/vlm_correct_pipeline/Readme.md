@@ -384,13 +384,15 @@ uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/co
 
 ### 当前任务：限定 50 张
 
-按用户最新要求，当前只处理 **50 张输入图片**，不继续派发全量数据。配置为 [config.national_50.yaml](config.national_50.yaml)，固定清单为 [national_50.json](national_50.json)：包含原有 32 张困难样本，另从其他视频中分散选取 18 张，共覆盖 50 个视频，train 37 张、val 13 张。这是定性检查样本，不是独立人工真值集或无偏随机样本。
+按用户最新要求，当前只处理 **50 张输入图片，并发为 2**，不继续派发全量数据。配置为 [config.national_50_c2.yaml](config.national_50_c2.yaml)，固定清单为 [national_50.json](national_50.json)：包含原有 32 张困难样本，另从其他视频中分散选取 18 张，共覆盖 50 个视频，train 37 张、val 13 张。这是定性检查样本，不是独立人工真值集或无偏随机样本。
 
-本次使用 `gpt-6-astra`、五组固定权威样例和 4 路图片并发，输出目录为 `outputs/vlm_correct/national_20261008_50/`。图片逐一记录在 `samples/`，完成后发布到 `dataset/data.yaml`。光照剔除及待复核图片不导出，所以最终保留数量可能小于 50。当前运行已启动，终态及验收仍待实际完成后确认。运行和恢复使用同一配置：
+本次使用 `gpt-6-astra`、五组固定权威样例和 2 路图片并发，输出目录为 `outputs/vlm_correct/national_20261008_50_c2/`。图片逐一记录在 `samples/`，完成后发布到 `dataset/data.yaml`。光照剔除及待复核图片不导出，所以最终保留数量可能小于 50。当前运行已启动，终态及验收仍待实际完成后确认。运行和恢复使用同一配置：
 
 ```bash
-uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/config.national_50.yaml
+uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/config.national_50_c2.yaml
 ```
+
+此前四路的 50 张尝试 `outputs/vlm_correct/national_20261008_50/` 在多轮预检第二轮连续遇到 HTTP 504，未开始目标图片处理，也未发布数据集。该目录及原配置保留用于诊断。元数据端点可访问并列出 `gpt-6-astra`，这不代表 Responses 多轮能力已经恢复。
 
 ### 已停止的全量尝试
 

@@ -1,0 +1,55 @@
+api:
+  env_file: .env
+  base_url_env: BASE_URL
+  api_key_env: API_KEY
+  model: gpt-6-astra
+  timeout_seconds: 120
+  max_output_tokens: 8192
+  stream: true
+dataset:
+  source: ../../datasets/generated/rm26_two_stage/national_20261007_conf08_kpt05/data.yaml
+  names:
+    0: pillar
+    1: exchange
+  input_task: pose_boxes
+  selection_file: national_50.json
+  source_rounding_tolerance: 1.0e-06
+references:
+  - image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/front.jpg
+    label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/front.txt
+    description: 正面权威样例，pillar 是移动兑换标记，exchange 框包含标记和科技核心整体。
+  - image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/left_45.jpg
+    label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/left_45.txt
+    description: 左侧 45 度权威样例。
+  - image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/right_45.jpg
+    label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/right_45.txt
+    description: 右侧 45 度权威样例。
+  - image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/up_45.jpg
+    label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/up_45.txt
+    description: 上方 45 度权威样例。
+  - image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/val/down_45.jpg
+    label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/val/down_45.txt
+    description: 下方 45 度权威样例；源数据的 val 划分在本任务中同样作为参考。
+annotation_rules: |
+  类别 0 pillar 是移动兑换标记，类别 1 exchange 是科技核心整体。
+  exchange 的框包含科技核心及其移动标记，允许与 pillar 框嵌套，不能将二者视为重复框删除。
+  按可见目标轮廓取紧致的轴对齐检测框。权威样例的掩码仅说明框的生成方式，不要求从真实照片恢复像素级分割掩码。
+    exchange 是样例中的六边形/盾形核心壳体及其移动标记，包含发光条和壳体可见侧面；不包含外部支撑柱、支撑座、围墙、机器人及机械臂。pillar 是核心正面带发光角点图案的小型移动标记面板，不是机器人夹爪或核心的支撑结构。
+    对遮挡或画面截断目标，只包围仍可见且可归属于目标的部分，不外推不可见轮廓。目标被分成多个可见片段时，用一个框覆盖这些可见片段；正常遮挡本身不是放弃理由。先用 inspect_region 看清局部，再尽力修正类别明确且可见范围可确定的框。
+  不根据背景或样例中的固定位置臆造目标；只有确认整图没有上述目标时才标记为空。
+  无法可靠判断类别、目标存在性或遮挡后的可见边界时，提交待复核。
+  源数据为比赛转播画面，左侧画中画和顶部队伍头像等 UI 区域不属于主视角标注范围。只标注主视角中实际存在的目标，不重复标注同一目标的画中画影像。
+  先检查目标区域光照。如果严重欠曝、眩光或过曝导致目标类别或可见边界无法可靠确定，使用 discard_image（poor_lighting），整张图片不进入输出数据集。不能因为背景偏暗而剔除目标仍清晰的图片，也不能把看不清误判成无目标。必要时查看局部裁剪；若并非光照问题而是证据不足，提交待复核。
+
+  依据权威样例，exchange 的上边界在六边形盾形壳体自身的顶部尖角/斜边。不要把核心背后或上方的弯曲管线、回环状支架、竖直立柱算进 exchange；它们不属于样例中的目标壳体。检查框边缘时沿盾形壳体的可见边缘，不沿周围安装结构。
+run:
+  image_concurrency: 2
+  max_model_calls: 30
+  max_retries: 3
+  max_consecutive_api_errors: 3
+image_max_edge: 1280
+image_format: jpeg
+jpeg_quality: 85
+output:
+  directory: ../../outputs/vlm_correct/national_20261008_50_c2
+coordinate_grid: true

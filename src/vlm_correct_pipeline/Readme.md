@@ -486,6 +486,8 @@ uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/co
 
 主配置仍读取原始 national pose 数据及 `national_50.json`，包含 train 37 张、val 13 张。冒烟清单选自同一 50 张，包含此前的 1 张负样本和 4 张正样本；此前检测结果不作为本轮真值。两轮均采用 `gpt-6-astra`、并发 2、每张每次尝试最多 30 次请求和最多 3 次临时故障重试，输出分别为 `outputs/vlm_correct/national_pose_smoke5_c2/` 与 `outputs/vlm_correct/national_pose_50_c2/`。
 
+真实 pose 请求携带十组参考及关键点状态，初始 120 秒时限连续触发超时；该尝试已正常中断，诊断保留于 `national_pose_smoke5_c2_timeout120/`，没有发布数据集。当前两份 pose 配置的请求总时限为 300 秒，其他调用预算与并发不变。
+
 仅 `completed`、`empty` 导出到新的数据集，保留 split；非空标签每行 `5+3K` 列（本批 41 列），YAML 写入逐类 `kpt_names`、`kpt_shape`、已配置的翻转与显示连线。源文件及上一轮检测导出不变。
 
 pose 使用运行格式版本 2，点定义、作用范围和适配参考的哈希都属于运行身份。旧检测配置继续使用原格式版本 1 的身份序列化，不因新增默认字段失去恢复能力。已完成 pose 结果可直接恢复，未完成图片重新从源标签开始；输入、点语义或配置改变则需新输出目录。

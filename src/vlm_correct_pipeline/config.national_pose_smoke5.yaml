@@ -3,7 +3,7 @@ api:
   base_url_env: BASE_URL
   api_key_env: API_KEY
   model: gpt-6-astra
-  timeout_seconds: 120
+  timeout_seconds: 300
   max_output_tokens: 8192
   stream: true
 dataset:

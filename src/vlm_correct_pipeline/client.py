@@ -6,6 +6,7 @@ from typing import Protocol, cast
 from openai import APIConnectionError, APIError, APIStatusError, OpenAI
 from openai.types.responses import ResponseInputParam, ToolChoiceFunctionParam, ToolParam
 from openai.types.responses.response import Response
+from openai.types.responses.response_output_item import ResponseOutputItem
 
 from .config import APIConfig, Credentials
 from .models import JSONObject, json_object
@@ -46,6 +47,18 @@ class Backend(Protocol):
         *,
         forced_tool: str | None = None,
     ) -> Turn: ...
+
+
+def history_item(item: ResponseOutputItem) -> JSONObject:
+    """Replay API fields, retaining reasoning/phase but excluding SDK-only parsed values."""
+    value = json_object(item.model_dump(mode="json", exclude_unset=True, exclude_none=True))
+    value.pop("parsed_arguments", None)
+    content = value.get("content")
+    if value.get("type") == "message" and isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                part.pop("parsed", None)
+    return value
 
 
 class ResponsesBackend:
@@ -122,7 +135,7 @@ class ResponsesBackend:
         ]
         usage = response.usage
         return Turn(
-            output=[json_object(item.model_dump(mode="json")) for item in response.output],
+            output=[history_item(item) for item in response.output],
             calls=calls,
             input_tokens=usage.input_tokens if usage else 0,
             output_tokens=usage.output_tokens if usage else 0,

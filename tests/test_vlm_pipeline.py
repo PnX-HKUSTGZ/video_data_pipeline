@@ -743,6 +743,8 @@ def test_streaming_accumulates_complete_response_before_exposing_tools():
         result = backend.respond([], tool_definitions())
         assert captured[0]["stream"] is True
         assert result.calls[0].name == "mark_empty" and result.input_tokens == 10
+        backend.respond(result.output, tool_definitions())
+        assert captured[1]["input"] == response["output"]
     finally:
         backend.close()
 

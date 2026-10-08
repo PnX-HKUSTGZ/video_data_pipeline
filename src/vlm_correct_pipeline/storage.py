@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import IO, Self
@@ -110,7 +111,7 @@ class RunStore:
         return SampleResult.model_validate_json(path.read_text()) if path.exists() else None
 
     def event(self, sample_id: str, attempt: int, value: JSONObject) -> None:
-        entry = {"attempt": attempt, **value}
+        entry = {"time": datetime.now(UTC).isoformat(), "attempt": attempt, **value}
         with (self.root / "events" / f"{sample_id}.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
             stream.flush()

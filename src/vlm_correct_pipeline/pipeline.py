@@ -5,6 +5,7 @@ import logging
 import shutil
 from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from threading import Event
@@ -134,9 +135,25 @@ def run(
             backupCount=3,
             encoding="utf-8",
         )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         logger.addHandler(handler)
         results: list[SampleResult] = []
         run_info: JSONObject = {}
+
+        def progress(status: str, stage: str) -> None:
+            """Expose cheap progress snapshots without scanning every sample checkpoint."""
+            write_json(
+                root / "progress.json",
+                {
+                    "status": status,
+                    "stage": stage,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                    "unique_images": len(data.samples),
+                    "processed_images": len(results),
+                    "remaining_images": len(data.samples) - len(results),
+                },
+            )
+
         try:
             reference_messages, ref_hashes = references(config, base, data.names)
             identity = {
@@ -174,6 +191,7 @@ def run(
             if previous_run:
                 run_info["capability_probe"] = previous_run.get("capability_probe")
             write_json(run_path, run_info)
+            progress("running", "preflight" if pending else "export")
             if pending:
                 logger.info("Checking endpoint capabilities before %d target images", len(pending))
                 probe_events: list[JSONObject] = []
@@ -200,6 +218,7 @@ def run(
                 write_json(root / "capability_probe.json", run_info["capability_probe"])
                 write_json(run_path, run_info)
                 prefix = [system_message(config, data.names), *reference_messages]
+                progress("running", "annotation")
                 waiting = deque(pending)
                 api_errors = 0
                 with ThreadPoolExecutor(max_workers=config.run.image_concurrency) as pool:
@@ -235,6 +254,7 @@ def run(
                             for future in ready:
                                 result = future.result()
                                 results.append(result)
+                                progress("running", "annotation")
                                 logger.info(
                                     "%s %s requests=%d",
                                     result.sample_id,
@@ -293,6 +313,7 @@ def run(
             )
             write_json(root / "report.json", report)
             write_json(run_path, {**run_info, "status": status})
+            progress(status, "finished")
             return report
         except BaseException as error:
             # Preserve the original identity on failed resume; never bless incompatible inputs.
@@ -310,6 +331,7 @@ def run(
                         "error": failure,
                     },
                 )
+                progress(failure_status, "failed")
                 write_json(
                     root / "report.json",
                     {

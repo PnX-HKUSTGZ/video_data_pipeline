@@ -14,7 +14,7 @@ import yaml
 pytest.importorskip("openai")
 pytest.importorskip("dotenv")
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 from PIL import Image
 
 from vlm_correct_pipeline.client import APIProblem, FunctionCall, ResponsesBackend, Turn
@@ -421,12 +421,11 @@ def test_sdk_wire_contract_and_reasoning_roundtrip():
         APIConfig(model="gpt-6-astra"),
         Credentials(base_url="https://test.invalid/v1", api_key="fake-key"),
     )
-    backend.client.close()
-    backend.client = OpenAI(
+    backend._client_factory = lambda: AsyncOpenAI(
         api_key="fake-key",
         base_url="https://test.invalid/v1",
         max_retries=0,
-        http_client=httpx.Client(transport=httpx.MockTransport(transport)),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
     )
     try:
         first = backend.respond([], tool_definitions())
@@ -677,11 +676,10 @@ def test_non_responses_payload_is_sanitized_protocol_error():
         APIConfig(model="gpt-6-astra"),
         Credentials(base_url="https://test.invalid/v1", api_key="fake-key"),
     )
-    backend.client.close()
-    backend.client = OpenAI(
+    backend._client_factory = lambda: AsyncOpenAI(
         api_key="fake-key",
         base_url="https://test.invalid/v1",
-        http_client=httpx.Client(
+        http_client=httpx.AsyncClient(
             transport=httpx.MockTransport(
                 lambda _: httpx.Response(200, text="gateway error with private details")
             )
@@ -733,11 +731,10 @@ def test_streaming_accumulates_complete_response_before_exposing_tools():
         APIConfig(model="gpt-6-astra", stream=True),
         Credentials(base_url="https://test.invalid/v1", api_key="fake-key"),
     )
-    backend.client.close()
-    backend.client = OpenAI(
+    backend._client_factory = lambda: AsyncOpenAI(
         api_key="fake-key",
         base_url="https://test.invalid/v1",
-        http_client=httpx.Client(transport=httpx.MockTransport(transport)),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
     )
     try:
         result = backend.respond([], tool_definitions())
@@ -767,3 +764,74 @@ def test_failed_probe_persists_evidence_without_creating_sample_labels(setup):
         report["counts"] == {} and report["unique_images"] == 1 and not report["published_dataset"]
     )
     assert not list((output / "samples").iterdir())
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_total_deadline_closes_heartbeat_and_dripping_responses(streaming):
+    import asyncio
+    import time
+
+    class Heartbeat(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0.005)
+                yield b": keepalive\n\n" if streaming else b" "
+
+        async def aclose(self):
+            self.closed = True
+
+    body = Heartbeat()
+    backend = ResponsesBackend(
+        APIConfig(model="gpt-6-astra", stream=streaming, timeout_seconds=0.08),
+        Credentials(base_url="https://test.invalid/v1", api_key="fake-key"),
+        client_factory=lambda: AsyncOpenAI(
+            api_key="fake-key",
+            base_url="https://test.invalid/v1",
+            max_retries=0,
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda _: httpx.Response(
+                        200,
+                        headers={
+                            "content-type": "text/event-stream" if streaming else "application/json"
+                        },
+                        stream=body,
+                    )
+                )
+            ),
+        ),
+    )
+    started = time.monotonic()
+    with pytest.raises(APIProblem, match="wall-time deadline") as error:
+        backend.respond([], tool_definitions())
+    assert time.monotonic() - started < 1
+    assert error.value.retryable and not error.value.fatal and body.closed
+
+
+def test_partial_stream_disconnect_is_retryable_and_never_exposes_draft_tool():
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b": keepalive\n\n"
+            raise httpx.RemoteProtocolError("private upstream context")
+
+    backend = ResponsesBackend(
+        APIConfig(model="gpt-6-astra", stream=True),
+        Credentials(base_url="https://test.invalid/v1", api_key="fake-key"),
+        client_factory=lambda: AsyncOpenAI(
+            api_key="fake-key",
+            base_url="https://test.invalid/v1",
+            max_retries=0,
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda _: httpx.Response(
+                        200, headers={"content-type": "text/event-stream"}, stream=BrokenStream()
+                    )
+                )
+            ),
+        ),
+    )
+    with pytest.raises(APIProblem, match="connection") as error:
+        backend.respond([], tool_definitions())
+    assert error.value.retryable and "private" not in str(error.value)

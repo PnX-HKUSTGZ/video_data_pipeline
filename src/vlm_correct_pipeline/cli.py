@@ -95,12 +95,18 @@ def main() -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         report = run(config, base, backend, endpoint_identity=auth.base_url, cancel=stop)
+        not_processed = report.get("not_processed", [])
         print(
             json.dumps(
                 {
-                    key: value
-                    for key, value in report.items()
-                    if key not in {"mapping", "samples", "capability_probe"}
+                    **{
+                        key: value
+                        for key, value in report.items()
+                        if key not in {"mapping", "samples", "capability_probe", "not_processed"}
+                    },
+                    "not_processed_count": len(not_processed)
+                    if isinstance(not_processed, list)
+                    else 0,
                 },
                 ensure_ascii=False,
                 indent=2,

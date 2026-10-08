@@ -31,7 +31,7 @@ uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/co
 
 `validate` 解码并校验本地输入及全部样例，不访问 API；输出不合法图片的路径。`probe` 携带完整固定样例上下文，用少量合成图片检查多图与多轮能力；配置已提供类别表时不读取待标注数据。`run` 在存在待处理图片时自动执行同样的能力探测，再开始标注；重复运行同一配置即恢复运行。
 
-退出码：`0` 为全部完成，`2` 为存在无效输入或未完成图片，`1` 为配置、服务或运行失败，`130` 为用户中断。进度记录在输出目录的 `logs/pipeline.log`，单图操作和最终结果分别见 `events/`、`samples/` 与 `report.json`。
+退出码：`0` 为全部完成，`2` 为存在无效输入或未完成图片，`1` 为配置、服务或运行失败，`130` 为用户中断。进度记录在输出目录的 `logs/pipeline.log`，单图操作和最终结果分别见 `events/`、`samples/` 与 `report.json`。终端摘要只打印未处理数量 `not_processed_count`，完整未处理 ID 清单保留在报告的 `not_processed`，避免大批次中断时向终端输出数万个 ID。
 
 ## 2. 输入与权威样例
 
@@ -382,12 +382,14 @@ uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/co
 
 结果与终态以 `report.json`、`capability_probe.json` 和 `samples/` 为准；运行中报告可能仍是上一次尝试的终态，应结合 `run.json`、`progress.json` 与实际进程判断。网络异常和未完成草稿不会发布为训练数据。
 
-全量配置为 [config.national_full.yaml](config.national_full.yaml)，去掉固定 32 张清单，对 23,620 张图片逐一处理，使用独立输出目录。配置发生变化时不能复用旧运行目录。光照统计的 89 张候选不等于最终剔除名单，最终以视觉检查的 `discarded` 结果为准。
+当前全量配置为 [config.national_full_c16.yaml](config.national_full_c16.yaml)，去掉固定 32 张清单，对 23,620 张图片逐一处理，使用独立输出目录和 16 张图片并发。配置发生变化时不能复用旧运行目录。光照统计的 89 张候选不等于最终剔除名单，最终以视觉检查的 `discarded` 结果为准。
 
-2026-10-08 全量任务已启动，输出目录为 `outputs/vlm_correct/national_20261008_full/`。此处仅记录启动事实，全量尚未验收完成。运行和恢复使用同一配置：
+2026-10-08 全量任务已启动，当前输出目录为 `outputs/vlm_correct/national_20261008_full_c16/`。此处仅记录启动事实，全量尚未验收完成。运行和恢复使用同一配置：
 
 ```bash
-uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/config.national_full.yaml
+uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/config.national_full_c16.yaml
 ```
+
+四路配置 [config.national_full.yaml](config.national_full.yaml) 的实测吞吐约 1.3 张／分钟。为缩短全量时间，已正常结束该次运行，并在新的 16 路运行中重新处理全部输入。旧目录 `outputs/vlm_correct/national_20261008_full/` 保留审计记录，状态为 `interrupted`，不是最终数据集。两份配置仅并发数及输出路径不同，类别、权威样例、标注规则、模型与请求限制完全相同；不跨配置拼接检查点。
 
 2026-10-08 定位校准：一次试标把核心上方的弯曲安装结构纳入框中。单独增加网格没有纠正该错误；明确“盾形壳体不包括上方管线和回环支架”后，同一真实图片的上边界从 0.157 修正为 0.228。受控回归记录位于 `.cache/vlm-correct-checks/grid_case_housing/output/quality_check.json`，仅验证这一已观察错误的修正，不替代独立人工质量评估。

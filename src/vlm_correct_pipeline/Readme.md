@@ -498,6 +498,28 @@ uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/co
 
 pose 使用运行格式版本 2，点定义、作用范围和适配参考的哈希都属于运行身份。旧检测配置继续使用原格式版本 1 的身份序列化，不因新增默认字段失去恢复能力。已完成 pose 结果可直接恢复，未完成图片重新从源标签开始；输入、点语义或配置改变则需新输出目录。
 
-当前离线集成与既有浏览器回归共 187 项通过，包含真实旧版检测检查点的零 API 恢复、pose 完成门槛、原子批量编辑、裁剪反馈、输入冲突及浏览器读取；46 个源文件的 mypy 及相关 Ruff 检查通过。
+当前离线集成与既有浏览器回归共 197 项通过，包含真实旧版检测检查点的零 API 恢复、pose 完成门槛、原子批量编辑、裁剪反馈、输入冲突及浏览器读取，以及流完成后持续心跳、异常终态和独立参考图尺寸；仓库 46 个源文件的 mypy 及相关 Ruff 检查通过。
 
-真实 Responses 合成验证已完成：一张四点图从偏移草稿修正至四个已知圆心，误差均为 0 像素；一张白图明确清空错误实例并确认为负样本。目标图共 3 次请求，另有启动预检，记录在 `.cache/vlm-correct-checks/pose-synthetic/verification.json`。这只证明该简单场景的工具与坐标闭环；本批真实图的处理结果在完成后记录，尚无独立人工点真值，不能宣称准确率或定位精度改善。
+真实 Responses 合成验证已完成：一张四点图从偏移草稿修正至四个已知圆心，误差均为 0 像素；一张白图明确清空错误实例并确认为负样本。目标图共 3 次请求，另有启动预检，记录在 `.cache/vlm-correct-checks/pose-synthetic/verification.json`。这只证明该简单场景的工具与坐标闭环；尚无独立人工点真值，不能宣称准确率或定位精度改善。
+
+### 固定 50 张 pose 运行结果
+
+2026-10-08 完成模型处理，2026-10-09 完成导出完整性核验。先行 5 张冒烟运行得到 1 张正样本、1 张负样本、2 张光照剔除和 1 张待复核，目标请求共 13 次；全部检查通过，记录位于 `outputs/vlm_correct/national_pose_smoke5_c2/full-verification.json`。主运行重新检查原固定清单的全部 50 张，没有复用冒烟或旧检测标签作为真值。
+
+| 最终状态 | 图片数 | 是否导出 |
+|---|---:|---|
+| `completed` | 13 | 是 |
+| `empty` | 1 | 是，标签为空 |
+| `discarded`（光照） | 12 | 否 |
+| `deferred` | 24 | 否，需人工复核 |
+| API 失败／调用超限／未处理 | 0 | 否 |
+
+输出数据集为 [national_pose_50_c2/dataset/data.yaml](../../outputs/vlm_correct/national_pose_50_c2/dataset/data.yaml)，共 **14 张**，train 12、val 2。`progress.json` 为 `finished`、剩余 0，运行状态 `partial` 表示有待复核图片，并非后台仍在处理。原始 pose 数据和上一轮检测输出均保留。
+
+成功的 13 张正样本包含 24 个实例、113 个可见适用点和 33 个置零适用点；不适用槽位全部为零，输出每行 41 列。模型通过 `add_box` 补充过两个源标签遗漏实例，最终保留点均经过显式 `set_keypoints` 确认。主运行目标请求 147 次，记录输入 token 3,802,460、输出 token 11,428；启动预检另计 2 次。期间 4 次 HTTP 502 和 2 次超时在重试预算内恢复，无失败终态；失败请求未返回的用量不能由客户端确定。
+
+[完整性核验](../../outputs/vlm_correct/national_pose_50_c2/full-verification.json) 核对全部 50 张源图片及标签、split、配置身份、20 个参考文件哈希、终态工具与事件、全部请求用量、检查点、14 组导出文件的哈希和独立副本、pose 元数据、浏览器读取及临时文件清理。源输入还与上一轮固定 50 张基线逐项一致。逐图终态见 [report.json](../../outputs/vlm_correct/national_pose_50_c2/report.json)，36 张排除图片及原因见 [exclusions.json](../../outputs/vlm_correct/national_pose_50_c2/exclusions.json)。验证脚本副本及原图／框点对照保存在 `review/`。
+
+全部 50 张及其目标局部已完成视觉查看，共 130 张原图／标注对照，记录与最终检查点和图片哈希绑定，见 [visual-review.json](../../outputs/vlm_correct/national_pose_50_c2/review/visual-review.json)。未发现证据明确、必须重跑的错误；`a6894207d5bf` 在倾斜视角下的壳体顶点身份仍建议人工抽检，逐图意见保留在三个 `visual-part*.json` 中。
+
+本轮待复核比例较高，主要涉及遮挡、UI 重叠及目标边界或点身份不可靠；允许部分可见点并不代表可以忽略无法确定的实例边界。视觉检查属于 Codex 定性复核，不能代替独立人工真值，也不能据此宣称定位精度提高。

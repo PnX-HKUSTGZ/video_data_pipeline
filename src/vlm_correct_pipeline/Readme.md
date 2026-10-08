@@ -486,7 +486,11 @@ uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/co
 
 主配置仍读取原始 national pose 数据及 `national_50.json`，包含 train 37 张、val 13 张。冒烟清单选自同一 50 张，包含此前的 1 张负样本和 4 张正样本；此前检测结果不作为本轮真值。两轮均采用 `gpt-6-astra`、并发 2、每张每次尝试最多 30 次请求和最多 3 次临时故障重试，输出分别为 `outputs/vlm_correct/national_pose_smoke5_c2/` 与 `outputs/vlm_correct/national_pose_50_c2/`。
 
-真实 pose 请求携带十组参考及关键点状态，初始 120 秒时限连续触发超时；该尝试已正常中断，诊断保留于 `national_pose_smoke5_c2_timeout120/`，没有发布数据集。当前两份 pose 配置的请求总时限为 300 秒，其他调用预算与并发不变。
+真实 pose 请求携带十组参考及关键点状态，初始 120 秒时限连续触发超时；该尝试已正常中断，诊断保留于 `national_pose_smoke5_c2_timeout120/`，没有发布数据集。300 秒、JPEG95 的尝试也遇到超时和 HTTP 502，原始事件与检查点保留于 `national_pose_smoke5_c2_timeout300_jpeg95/`，未确认草稿没有导出。
+
+当前两份 pose 配置的请求总时限为 300 秒，传输 JPEG 质量为 90，其他调用预算与并发不变。十组原图与覆盖图仍保持 1280×720；参考图片的 base64 体积从约 9.56 MiB 降到 7.01 MiB，原图、标签和归一化坐标均不变。这降低多轮历史重发的体积，不代表视觉 token 或标注误差同比下降。较早请求首次超过约 16 MiB 后出现快速 502，但后续较小请求也超时，尚未证实请求体大小是根因。
+
+流式客户端收到 `response.completed` 后使用 SDK 已解析的完整响应并关闭连接，不再额外等待 EOF；没有完成事件时仍执行总时限，半截工具参数不会执行。超时诊断仅记录已观察 SDK 事件数量、首事件耗时及白名单内的末事件类型，不记录请求内容。事件数为零不能区分无响应与被 SDK 忽略的 SSE 心跳；该兼容性修复是否解释真实服务超时，需要实际请求证据。
 
 仅 `completed`、`empty` 导出到新的数据集，保留 split；非空标签每行 `5+3K` 列（本批 41 列），YAML 写入逐类 `kpt_names`、`kpt_shape`、已配置的翻转与显示连线。源文件及上一轮检测导出不变。
 

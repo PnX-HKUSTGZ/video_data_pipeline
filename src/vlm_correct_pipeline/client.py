@@ -2,7 +2,8 @@
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import monotonic
 from typing import Protocol, cast
 
 import httpx
@@ -22,6 +23,53 @@ class APIProblem(Exception):
         super().__init__(message)
         self.retryable = retryable
         self.fatal = fatal
+
+
+@dataclass
+class _StreamTrace:
+    """Request-local transport diagnostics; never retain event contents or identifiers."""
+
+    started: float = field(default_factory=monotonic)
+    events: int = 0
+    first_event_ms: int | None = None
+    last_event: str = "none"
+
+    def note(self, kind: str) -> None:
+        self.events += 1
+        if self.first_event_ms is None:
+            self.first_event_ms = round((monotonic() - self.started) * 1000)
+        # SDK model construction is permissive: do not log an arbitrary upstream type string.
+        self.last_event = (
+            kind
+            if kind
+            in {
+                "response.created",
+                "response.in_progress",
+                "response.completed",
+                "response.failed",
+                "response.incomplete",
+                "response.output_item.added",
+                "response.output_item.done",
+                "response.content_part.added",
+                "response.content_part.done",
+                "response.function_call_arguments.delta",
+                "response.function_call_arguments.done",
+                "response.output_text.delta",
+                "response.output_text.done",
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_summary_text.done",
+                "response.reasoning_summary_part.added",
+                "response.reasoning_summary_part.done",
+                "error",
+            }
+            else "other"
+        )
+
+    def summary(self) -> str:
+        first = str(self.first_event_ms) if self.first_event_ms is not None else "none"
+        return (
+            f" [stream_events={self.events}; first_event_ms={first}; last_event={self.last_event}]"
+        )
 
 
 @dataclass(frozen=True)
@@ -95,6 +143,7 @@ class ResponsesBackend:
         history: list[JSONObject],
         tools: list[JSONObject],
         forced_tool: str | None,
+        trace: _StreamTrace,
     ) -> Response:
         """Bound total wall time, including heartbeat streams and partial-body reads."""
         choice: ToolChoiceFunctionParam = {"type": "function", "name": forced_tool or ""}
@@ -111,7 +160,18 @@ class ResponsesBackend:
                     include=["reasoning.encrypted_content"],
                     max_output_tokens=self.config.max_output_tokens,
                 ) as stream:
-                    return await stream.get_final_response()
+                    async for event in stream:
+                        trace.note(event.type)
+                        if event.type == "response.completed":
+                            # The SDK already parsed/accumulated this response. Waiting for
+                            # get_final_response() also waits for EOF, which some gateways
+                            # postpone with heartbeats after this authoritative terminal event.
+                            return event.response
+                        if event.type == "response.failed" or event.type == "response.incomplete":
+                            # A contradictory nested status must not turn a failure event
+                            # into an executable completed tool call.
+                            raise APIProblem("Responses output was incomplete or failed")
+                    raise RuntimeError("Responses stream ended before completion")
             return await client.responses.create(
                 model=self.config.model,
                 input=cast(ResponseInputParam, history),
@@ -132,8 +192,9 @@ class ResponsesBackend:
         forced_tool: str | None = None,
     ) -> Turn:
         """Provide a synchronous worker boundary backed by cancellable async HTTP."""
+        trace = _StreamTrace()
         try:
-            response = asyncio.run(self._request(history, tools, forced_tool))
+            response = asyncio.run(self._request(history, tools, forced_tool, trace))
         except APIStatusError as error:
             status = error.status_code
             raise APIProblem(
@@ -142,13 +203,21 @@ class ResponsesBackend:
                 fatal=status in {400, 401, 403, 404, 405, 422},
             ) from None
         except TimeoutError:
-            raise APIProblem("Responses wall-time deadline exceeded", retryable=True) from None
+            diagnostics = trace.summary() if self.config.stream else ""
+            raise APIProblem(
+                "Responses wall-time deadline exceeded" + diagnostics, retryable=True
+            ) from None
         except (APIConnectionError, httpx.TransportError):
-            raise APIProblem("Responses connection or timeout error", retryable=True) from None
+            diagnostics = trace.summary() if self.config.stream else ""
+            raise APIProblem(
+                "Responses connection or timeout error" + diagnostics, retryable=True
+            ) from None
         except APIError:
             raise APIProblem("Invalid Responses protocol response", fatal=True) from None
         except RuntimeError:
-            raise APIProblem("Responses stream ended before completion", retryable=True) from None
+            raise APIProblem(
+                "Responses stream ended before completion" + trace.summary(), retryable=True
+            ) from None
         if not isinstance(response, Response):
             raise APIProblem("Endpoint returned a non-Responses payload", fatal=True)
         if response.status != "completed":

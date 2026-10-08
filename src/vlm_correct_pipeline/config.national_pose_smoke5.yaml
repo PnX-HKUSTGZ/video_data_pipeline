@@ -82,7 +82,7 @@ run:
   max_consecutive_api_errors: 3
 image_max_edge: 1280
 image_format: jpeg
-jpeg_quality: 95
+jpeg_quality: 90
 output:
   directory: ../../outputs/vlm_correct/national_pose_smoke5_c2
 coordinate_grid: true

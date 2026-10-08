@@ -382,14 +382,20 @@ uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/co
 
 结果与终态以 `report.json`、`capability_probe.json` 和 `samples/` 为准；运行中报告可能仍是上一次尝试的终态，应结合 `run.json`、`progress.json` 与实际进程判断。网络异常和未完成草稿不会发布为训练数据。
 
-当前全量配置为 [config.national_full_c16.yaml](config.national_full_c16.yaml)，去掉固定 32 张清单，对 23,620 张图片逐一处理，使用独立输出目录和 16 张图片并发。配置发生变化时不能复用旧运行目录。光照统计的 89 张候选不等于最终剔除名单，最终以视觉检查的 `discarded` 结果为准。
+### 当前任务：限定 50 张
 
-2026-10-08 全量任务已启动，当前输出目录为 `outputs/vlm_correct/national_20261008_full_c16/`。此处仅记录启动事实，全量尚未验收完成。运行和恢复使用同一配置：
+按用户最新要求，当前只处理 **50 张输入图片**，不继续派发全量数据。配置为 [config.national_50.yaml](config.national_50.yaml)，固定清单为 [national_50.json](national_50.json)：包含原有 32 张困难样本，另从其他视频中分散选取 18 张，共覆盖 50 个视频，train 37 张、val 13 张。这是定性检查样本，不是独立人工真值集或无偏随机样本。
+
+本次使用 `gpt-6-astra`、五组固定权威样例和 4 路图片并发，输出目录为 `outputs/vlm_correct/national_20261008_50/`。图片逐一记录在 `samples/`，完成后发布到 `dataset/data.yaml`。光照剔除及待复核图片不导出，所以最终保留数量可能小于 50。当前运行已启动，终态及验收仍待实际完成后确认。运行和恢复使用同一配置：
 
 ```bash
-uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/config.national_full_c16.yaml
+uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/config.national_50.yaml
 ```
 
-四路配置 [config.national_full.yaml](config.national_full.yaml) 的实测吞吐约 1.3 张／分钟。为缩短全量时间，已正常结束该次运行，并在新的 16 路运行中重新处理全部输入。旧目录 `outputs/vlm_correct/national_20261008_full/` 保留审计记录，状态为 `interrupted`，不是最终数据集。两份配置仅并发数及输出路径不同，类别、权威样例、标注规则、模型与请求限制完全相同；不跨配置拼接检查点。
+### 已停止的全量尝试
+
+全量配置 [config.national_full.yaml](config.national_full.yaml) 和 [config.national_full_c16.yaml](config.national_full_c16.yaml) 保留供以后使用，当前均未运行。四路尝试实测吞吐约 1.3 张／分钟，已正常中断；十六路尝试出现持续 HTTP 504、连接及总时长超时，由连续失败保护自动停止，未发布数据集。记录分别保留在 `outputs/vlm_correct/national_20261008_full/` 与 `outputs/vlm_correct/national_20261008_full_c16/`，不能作为完整优化结果。
+
+配置发生变化时使用新的输出目录，不跨配置拼接检查点。完整光照审计中的 89 张候选不等于最终剔除名单，最终以视觉检查的 `discarded` 结果为准。
 
 2026-10-08 定位校准：一次试标把核心上方的弯曲安装结构纳入框中。单独增加网格没有纠正该错误；明确“盾形壳体不包括上方管线和回环支架”后，同一真实图片的上边界从 0.157 修正为 0.228。受控回归记录位于 `.cache/vlm-correct-checks/grid_case_housing/output/quality_check.json`，仅验证这一已观察错误的修正，不替代独立人工质量评估。

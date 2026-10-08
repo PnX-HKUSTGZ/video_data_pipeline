@@ -81,6 +81,7 @@ run:
   max_retries: 3
   max_consecutive_api_errors: 3
 image_max_edge: 1280
+reference_max_edge: 768
 image_format: jpeg
 jpeg_quality: 90
 output:

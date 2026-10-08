@@ -124,6 +124,7 @@ class Config(StrictModel):
     run: RunConfig = Field(default_factory=RunConfig)
     output: OutputConfig
     image_max_edge: int = Field(default=2048, ge=256, le=8192)
+    reference_max_edge: int | None = Field(default=None, ge=256, le=8192)
     image_format: Literal["jpeg", "png"] = "jpeg"
     jpeg_quality: int = Field(default=95, ge=1, le=100)
     coordinate_grid: bool = False
@@ -164,6 +165,8 @@ def load_config(path: Path) -> Config:
 def identity_config(config: Config) -> dict[str, JsonValue]:
     """Preserve historical detection fingerprints while fully identifying pose runs."""
     content: dict[str, JsonValue] = config.model_dump(mode="json")
+    if config.reference_max_edge is None:
+        content.pop("reference_max_edge", None)
     if config.pose is None:
         content.pop("pose", None)
         references = content["references"]

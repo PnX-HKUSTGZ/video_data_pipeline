@@ -1,14 +1,17 @@
 """Offline pose ingestion, Responses feedback, recovery, and portable export checks."""
 
+import base64
 import json
+from io import BytesIO
 from pathlib import Path
 from threading import Event
 
 import pytest
 import yaml
+from PIL import Image
 from test_vlm_pipeline import ScriptedBackend, output_payload, picture
 
-from vlm_correct_pipeline.config import Config
+from vlm_correct_pipeline.config import Config, identity_config
 from vlm_correct_pipeline.data import discover, file_hash, load_boxes, object_hash
 from vlm_correct_pipeline.models import PoseBox
 from vlm_correct_pipeline.pipeline import run
@@ -246,6 +249,62 @@ def test_pose_edits_return_full_image_and_focus_crop_before_next_call(pose_setup
     first = output_payload(outputs[0])
     assert first["boxes"][0]["keypoints"][0]["reviewed"] is True
     assert first["boxes"][1]["keypoints"][4]["reviewed"] is False
+
+
+@pytest.mark.parametrize(
+    "reference_limit,expected_reference_size", [(None, (512, 288)), (256, (256, 144))]
+)
+def test_reference_resolution_override_keeps_target_and_crop_resolution(
+    pose_setup, reference_limit, expected_reference_size
+):
+    config, base, source = pose_setup
+    picture(source / "images/train/one.png", size=(1600, 900))
+    picture(Path(config.references[0].image), size=(1600, 900))
+    config.image_max_edge = 512
+    config.reference_max_edge = reference_limit
+    backend = ScriptedBackend(completed_actions())
+    run(config, base, backend, endpoint_identity="local")
+
+    def dimensions(content):
+        sizes = []
+        for item in content:
+            if item.get("type") == "input_image":
+                with Image.open(
+                    BytesIO(base64.b64decode(item["image_url"].split(",", 1)[1]))
+                ) as image:
+                    sizes.append(image.size)
+        return sizes
+
+    history = next(history for history in backend.histories if target_header(history))
+    trusted = next(
+        message
+        for message in history
+        if isinstance(message.get("content"), list)
+        and message["content"][0].get("type") == "input_text"
+        and '"trusted_reference"' in message["content"][0]["text"]
+    )
+    assert dimensions(trusted["content"]) == [expected_reference_size] * 2
+    assert dimensions(history[-1]["content"]) == [(512, 288)] * 2
+    feedback = next(
+        item for item in backend.histories[-1] if item.get("type") == "function_call_output"
+    )
+    sizes = dimensions(feedback["output"])
+    assert len(sizes) == 4 and all(max(size) == 512 for size in sizes)
+    assert output_payload(feedback)["full_image_size"] == [1600, 900]
+
+
+def test_reference_resolution_is_optional_but_part_of_explicit_run_identity(pose_setup):
+    config, _, _ = pose_setup
+    prior_identity = identity_config(config)
+    assert "reference_max_edge" not in prior_identity
+    explicit_null = Config.model_validate_json(config.model_dump_json())
+    assert identity_config(explicit_null) == prior_identity
+    config.reference_max_edge = 768
+    changed_identity = identity_config(config)
+    assert changed_identity["reference_max_edge"] == 768
+    assert object_hash(changed_identity) != object_hash(prior_identity)
+    changed_identity.pop("reference_max_edge")
+    assert changed_identity == prior_identity
 
 
 def test_pose_export_viewer_roundtrip_and_network_free_resume(pose_setup):

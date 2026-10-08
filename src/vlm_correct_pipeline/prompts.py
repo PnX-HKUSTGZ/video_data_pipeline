@@ -117,7 +117,7 @@ def references(
                 image,
                 boxes,
                 names,
-                config.image_max_edge,
+                config.reference_max_edge or config.image_max_edge,
                 encoding=config.image_format,
                 jpeg_quality=config.jpeg_quality,
                 coordinate_grid=config.coordinate_grid,

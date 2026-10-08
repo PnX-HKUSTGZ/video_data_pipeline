@@ -93,6 +93,7 @@ def test_config_modes_and_legacy_identity(pose):
     identity = identity_config(config)
     expected = config.model_dump(mode="json")
     expected.pop("pose")
+    expected.pop("reference_max_edge")
     expected["references"][0].pop("scope")
     assert identity == expected
     assert "pose" not in identity
@@ -102,7 +103,9 @@ def test_config_modes_and_legacy_identity(pose):
     with pytest.raises(ValidationError, match="required exactly"):
         Config.model_validate(values)
     config = Config.model_validate({**values, "pose": pose.model_dump()})
-    assert identity_config(config) == config.model_dump(mode="json")
+    expected = config.model_dump(mode="json")
+    expected.pop("reference_max_edge")
+    assert identity_config(config) == expected
 
 
 def test_pending_is_not_confirmed_absence_and_no_hidden_point_inference(pose):

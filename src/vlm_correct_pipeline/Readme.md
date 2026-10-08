@@ -1,10 +1,12 @@
-# YOLO 检测数据集的 VLM 自动标注与修正
+# YOLO 检测与 Pose 数据集的 VLM 自动标注与修正
 
-通过 OpenAI Responses API，让视觉语言模型参考固定权威样例，在“观察 → 编辑检测框 → 查看渲染结果 → 再编辑”的交互循环中完成标注。程序维护标注状态并执行受限工具，模型使用完整图片的归一化坐标操作检测框，也可以明确将图片标记为无目标。
+通过 OpenAI Responses API，让视觉语言模型参考固定权威样例，在“观察 → 编辑检测框或关键点 → 查看渲染结果 → 再编辑”的交互循环中完成标注。程序维护标注状态并执行受限工具，模型使用完整图片的归一化坐标操作框与点，也可以明确将图片标记为无目标。
 
 ## 1. 当前状态与第一版范围
 
 **第一版已实现**：提供 `validate`、`probe`、`run` 和 `audit-lighting` CLI 命令，支持逐框编辑、局部查看、显式负样本、光照剔除、检查点恢复和独立检测数据集导出。图片处理使用 CPU，不初始化训练模型或 GPU。
+
+**Pose 扩展已实现**：新增 `dataset.input_task: pose`，联合复核框与关键点，支持逐实例批量点编辑、逐点确认状态、分工明确的框／关键点样例及独立 pose 导出。使用与实际验证情况见第 11 节。
 
 | 内容 | 当前状态 |
 | --- | --- |
@@ -15,7 +17,7 @@
 | Responses 连通性、多图及多轮工具调用验证 | `gpt-6-astra` 合成场景和完整五组权威样例上下文的两轮预检已通过；每次有待处理图片时仍执行预检 |
 | 真实场景标注质量评估 | national 的 50 张限定处理已结束，并发 2；导出 31 张并通过完整性校验，完成 Codex 视觉检查及 5 张针对性重检；仍缺独立人工真值 |
 
-第一版支持 YOLO 轴对齐目标检测框，包括无标签图片的自动标注和已有标签的修正。可显式读取 pose 数据中的检测框，输出不含关键点的检测数据集，源 pose 文件保持原样。分割、旋转框、关键点修正、自动类别扩展、样例检索和人工编辑界面仍为未实现能力。
+支持 YOLO 轴对齐检测框及 `[K,3]` pose，包括无标签图片的自动标注和已有标签的修正。`pose_boxes` 仍仅提取检测框，`pose` 才联合修正并导出关键点，源文件保持原样。分割、旋转框、二维无可见性字段的 pose、遮挡点推断、三维位姿解算、自动类别扩展、样例检索和人工编辑界面仍为未实现能力。
 
 ### 使用
 
@@ -104,6 +106,7 @@ h  = ymax - ymin
 | --- | --- | --- |
 | `add_box` | `class_id, bbox` | 新增框，返回新 ID、完整框列表及最新整图渲染 |
 | `update_box` | `box_id, class_id, bbox` | 提交该框的完整类别和坐标，返回更新后的列表及整图渲染 |
+| `set_keypoints`（仅 pose） | `box_id, updates[{index,x,y,visibility}]` | 原子提交同一实例的一个或多个适用点，同时确认这些点；返回整图及目标局部对照 |
 | `delete_box` | `box_id` | 删除指定框，返回最新列表及整图渲染；删除最后一个框不自动完成 |
 | `inspect_region` | `bbox` | 返回局部原图、局部带框图和区域在完整图片中的范围，不修改标注 |
 | `finish_annotation` | `reason` | 确认当前非空且合法的框集合已完成，终态为 `completed` |
@@ -323,7 +326,7 @@ example_run/
 以下为实现的验收项目。离线测试位于 `tests/test_vlm_pipeline.py`，与现有 YOLO 读取／导出回归测试一同运行；真实场景质量评估仍需独立人工真值集。
 
 ```bash
-uv run --locked --extra vlm --extra viewer pytest -q tests/test_vlm_pipeline.py tests/test_viewer.py tests/test_viewer_exports.py
+uv run --locked --extra vlm --extra viewer pytest -q tests/test_vlm_pipeline.py tests/test_vlm_pose_*.py tests/test_viewer.py tests/test_viewer_exports.py
 uv run --locked --extra vlm mypy
 uv run --locked --extra vlm ruff check src/vlm_correct_pipeline tests/test_vlm_pipeline.py
 ```
@@ -422,3 +425,71 @@ uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/co
 配置发生变化时使用新的输出目录，不跨配置拼接检查点。完整光照审计中的 89 张候选不等于最终剔除名单，最终以视觉检查的 `discarded` 结果为准。
 
 2026-10-08 定位校准：一次试标把核心上方的弯曲安装结构纳入框中。单独增加网格没有纠正该错误；明确“盾形壳体不包括上方管线和回环支架”后，同一真实图片的上边界从 0.157 修正为 0.228。受控回归记录位于 `.cache/vlm-correct-checks/grid_case_housing/output/quality_check.json`，仅验证这一已观察错误的修正，不替代独立人工质量评估。
+
+## 11. Pose 联合标注
+
+### 输入、点序与可见性
+
+`dataset.input_task: pose` 必须同时提供 `pose` 配置：`kpt_shape: [K,3]`、`kpt_names`、`class_keypoint_indices`、逐点物理定义 `point_definitions`，以及可选的 `flip_idx`、`skeleton`。点数、点序及翻转／连线元数据与源 YAML 冲突时停止启动。无标签图片目录可以由配置补充类别及点数。
+
+national 配置采用固定的 12 槽：
+
+| 类别 | 适用索引（从 0 开始） | 点名 |
+| --- | --- | --- |
+| `pillar` | 0–4 | TL、TR、BL、BR、ring |
+| `exchange` | 5–11 | light_BR、light_TR、shell_R、shell_M、shell_L、light_TL、light_BL |
+
+点名属于物体自身，不能随画面旋转按屏幕左右重新编号。每个实例始终保留全部 12 槽，不适用槽位严格为 `0 0 0`；源标签违反此规则则该图片为 `invalid_input`。
+
+所有点坐标均相对完整原图归一化。最终标签只包含可可靠定位的可见点 `v=2`，以及不可见、遮挡、出画或位置不可靠的 `0 0 0`。源 `v=1` 可以作为草稿读取，但模型必须明确改为 `v=0/2`；适用槽位的源 `v=0` 若带旧坐标，规范为零并记录 `source_labels` 事件。非适用槽位不采用该规范化例外。ring 是离开四角平面的独立几何参考点，不是四角中心；无法直接观察时置零，不能进行几何推算。
+
+### 固定样例的作用范围
+
+参考项支持 `scope: annotation | boxes | keypoints`，默认 `annotation`。pose 运行中的 `annotation` 同时约束框与点，`boxes` 读取检测标签，仅约束框，`keypoints` 读取 pose 标签，仅约束点。
+
+本批使用十组参考：原五视角检测样例继续定义 `pillar` 面板框和 `exchange` 核心框；另五张来自 HKUST `experiment_v2/exchange_pose` 的样例，仅定义关键点。pose 样例副本位于 `datasets/vlm_correct_pipeline/references/exchange_pose_visible5/`，文件为 `val_frame_003488`、`002498`、`000395`、`000479`、`000607`。原标签和适配标签分开保存，55 个可见点坐标原样保留，仅五个 ring 遮挡点规范为零，来源、哈希与转换记录见 `manifest.json`、`copy-verification.json`。
+
+新的 pose 样例源框包含伸出的装配柱，与本任务的面板框定义不同。因此 `keypoints` 参考的结构化内容、图像覆盖和裁剪逻辑均不使用其源框；模型只收到原图、点身份和编号点图。生成器的几何无遮挡状态不保证肉眼可定位，样例准备阶段还需视觉检查。真实场景仍按可见性规则重新判断。
+
+### 点编辑与完成条件
+
+每个适用点保存独立的 `reviewed` 状态。已有 `v=2` 和 `v=0` 均为待复核草稿，新建实例的适用点也全部待标注；不适用槽位直接确认缺失。模型使用 `set_keypoints` 提交全部适用点，可以分多次提交，也可以一次提交一个实例的全部点：
+
+```json
+{
+  "box_id": "box_0001",
+  "updates": [
+    {"index": 0, "x": 0.42, "y": 0.36, "visibility": 2},
+    {"index": 1, "x": 0.49, "y": 0.37, "visibility": 2},
+    {"index": 2, "x": 0.41, "y": 0.46, "visibility": 2},
+    {"index": 3, "x": 0.48, "y": 0.47, "visibility": 2},
+    {"index": 4, "x": 0, "y": 0, "visibility": 0}
+  ]
+}
+```
+
+这是参数示例，不是任何真实图片的真值。重复索引、非适用索引、越界／非有限坐标、`v=1` 或非零坐标的 `v=0` 会拒绝整次修改，状态与版本保持不变。
+
+同类改框不平移或缩放关键点；改类别后重置全部点，必须复核新类别适用槽位。删除实例连同其点一起删除。可见点在框外时返回警告并要求模型复查，不自动吸附或扩大框。
+
+每次有效框／点编辑后反馈最新整图，及编辑实例周围的原图／带框点局部对照。查看区域按框与可见点的并集外扩 10%，局部图仍显示完整原图坐标。关键点连线仅连接当前实例中可见的端点，原图始终保留供对照。
+
+`finish_annotation` 要求所有适用点均已明确复核，每个实例至少有一个可靠可见点。部分点不可定位可以置零后保留其余点；任一真实目标没有可定位点则整图待复核，光照导致的问题按原规则剔除。不能删除真实目标或标为空来规避缺点检查。普通文字及调用超限均不算完成。
+
+### 运行、导出与验证
+
+```bash
+uv run --locked --extra vlm vlm-correct validate --config src/vlm_correct_pipeline/config.national_pose_50_c2.yaml
+uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/config.national_pose_smoke5.yaml
+uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/config.national_pose_50_c2.yaml
+```
+
+主配置仍读取原始 national pose 数据及 `national_50.json`，包含 train 37 张、val 13 张。冒烟清单选自同一 50 张，包含此前的 1 张负样本和 4 张正样本；此前检测结果不作为本轮真值。两轮均采用 `gpt-6-astra`、并发 2、每张每次尝试最多 30 次请求和最多 3 次临时故障重试，输出分别为 `outputs/vlm_correct/national_pose_smoke5_c2/` 与 `outputs/vlm_correct/national_pose_50_c2/`。
+
+仅 `completed`、`empty` 导出到新的数据集，保留 split；非空标签每行 `5+3K` 列（本批 41 列），YAML 写入逐类 `kpt_names`、`kpt_shape`、已配置的翻转与显示连线。源文件及上一轮检测导出不变。
+
+pose 使用运行格式版本 2，点定义、作用范围和适配参考的哈希都属于运行身份。旧检测配置继续使用原格式版本 1 的身份序列化，不因新增默认字段失去恢复能力。已完成 pose 结果可直接恢复，未完成图片重新从源标签开始；输入、点语义或配置改变则需新输出目录。
+
+当前离线集成与既有浏览器回归共 187 项通过，包含真实旧版检测检查点的零 API 恢复、pose 完成门槛、原子批量编辑、裁剪反馈、输入冲突及浏览器读取；46 个源文件的 mypy 及相关 Ruff 检查通过。
+
+真实 Responses 合成验证已完成：一张四点图从偏移草稿修正至四个已知圆心，误差均为 0 像素；一张白图明确清空错误实例并确认为负样本。目标图共 3 次请求，另有启动预检，记录在 `.cache/vlm-correct-checks/pose-synthetic/verification.json`。这只证明该简单场景的工具与坐标闭环；本批真实图的处理结果在完成后记录，尚无独立人工点真值，不能宣称准确率或定位精度改善。

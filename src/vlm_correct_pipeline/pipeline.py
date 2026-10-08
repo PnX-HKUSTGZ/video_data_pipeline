@@ -13,7 +13,7 @@ from threading import Event
 from PIL import UnidentifiedImageError
 
 from .client import APIProblem, Backend
-from .config import Config, local_path
+from .config import Config, identity_config, local_path
 from .data import DatasetInput, Sample, discover, file_hash, load_boxes, object_hash, unchanged
 from .engine import RunCancelled, annotate, probe
 from .models import DONE, JSONObject, SampleResult, json_object
@@ -82,10 +82,15 @@ def process_sample(
             kpt_shape=data.kpt_shape,
             rounding_tolerance=config.dataset.source_rounding_tolerance,
             adjustments=adjustments,
+            pose=config.pose,
         )
         record(
             json_object(
-                {"event": "source_labels", "input_task": data.task, "rounding": adjustments}
+                {
+                    "event": "source_labels", "input_task": data.task, "rounding": adjustments,
+                    **({"boxes": [box.model_dump(mode="json") for box in state.boxes]}
+                       if config.pose else {}),
+                }
             )
         )
         image = load_image(sample.image)
@@ -125,7 +130,7 @@ def run(
         run_path = root / "run.json"
         previous_run = json_object(json.loads(run_path.read_text())) if run_path.exists() else None
         if previous_run is None:
-            write_json(run_path, {"status": "preparing", "format_version": 1})
+            write_json(run_path, {"status": "preparing", "format_version": 2 if config.pose else 1})
         logger = logging.getLogger(f"vlm_correct.{root}")
         logger.setLevel(logging.INFO)
         logger.propagate = False
@@ -157,8 +162,8 @@ def run(
         try:
             reference_messages, ref_hashes = references(config, base, data.names)
             identity = {
-                "format_version": 1,
-                "config": config.model_dump(mode="json"),
+                "format_version": 2 if config.pose else 1,
+                "config": identity_config(config),
                 "base": str(base),
                 "endpoint": endpoint_identity,
                 "names": {str(key): value for key, value in data.names.items()},
@@ -297,7 +302,7 @@ def run(
                         s.sample_id for s in data.samples if s.sample_id not in processed_ids
                     ],
                     "input_task": config.dataset.input_task,
-                    "output_task": "detect",
+                    "output_task": data.output_task,
                     "exported_entries": len(mapping),
                     "mapping": mapping,
                     "samples": [
@@ -340,7 +345,7 @@ def run(
                         "error": failure,
                         "unique_images": len(data.samples),
                         "input_task": config.dataset.input_task,
-                        "output_task": "detect",
+                        "output_task": data.output_task,
                         "counts": dict(Counter(r.status for r in results)),
                         "published_dataset": (root / "dataset").is_dir(),
                     },

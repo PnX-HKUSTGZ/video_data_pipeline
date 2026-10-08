@@ -64,6 +64,7 @@ def main() -> int:
                         task=data.task,
                         kpt_shape=data.kpt_shape,
                         rounding_tolerance=config.dataset.source_rounding_tolerance,
+                        pose=config.pose,
                     )
                     with load_image(sample.image):
                         pass

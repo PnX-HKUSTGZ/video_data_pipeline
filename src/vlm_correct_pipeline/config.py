@@ -2,12 +2,20 @@
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 from urllib.parse import urlsplit
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 
 class StrictModel(BaseModel):
@@ -36,7 +44,7 @@ class APIConfig(StrictModel):
 class DatasetConfig(StrictModel):
     source: str
     names: dict[int, str] | None = None
-    input_task: Literal["detect", "pose_boxes"] = "detect"
+    input_task: Literal["detect", "pose_boxes", "pose"] = "detect"
     selection_file: str | None = None
     source_rounding_tolerance: float = Field(default=0, ge=0, le=1e-6)
 
@@ -45,6 +53,54 @@ class ReferenceConfig(StrictModel):
     image: str
     label: str
     description: str = ""
+    scope: Literal["annotation", "boxes", "keypoints"] = "annotation"
+
+
+class PoseConfig(StrictModel):
+    """Define immutable point identities and the slots applicable to each class."""
+
+    kpt_shape: list[int]
+    kpt_names: list[str]
+    class_keypoint_indices: dict[int, list[int]]
+    point_definitions: dict[str, str]
+    flip_idx: list[int] | None = None
+    skeleton: list[list[int]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def valid_structure(self) -> Self:
+        """Reject ambiguous point order, applicability, and positional metadata."""
+        if len(self.kpt_shape) != 2 or self.kpt_shape[0] < 1 or self.kpt_shape[1] != 3:
+            raise ValueError("pose.kpt_shape must be [positive point count, 3]")
+        count = self.kpt_shape[0]
+        if (
+            len(self.kpt_names) != count
+            or any(not name.strip() for name in self.kpt_names)
+            or len(set(self.kpt_names)) != count
+        ):
+            raise ValueError("pose.kpt_names must contain one unique nonempty name per slot")
+        if set(self.point_definitions) != set(self.kpt_names) or any(
+            not definition.strip() for definition in self.point_definitions.values()
+        ):
+            raise ValueError("pose.point_definitions must define every point name exactly once")
+        if not self.class_keypoint_indices:
+            raise ValueError("pose.class_keypoint_indices must define class applicability")
+        for class_id, indices in self.class_keypoint_indices.items():
+            if (
+                class_id < 0
+                or not indices
+                or len(set(indices)) != len(indices)
+                or any(index < 0 or index >= count for index in indices)
+            ):
+                raise ValueError("Each pose class requires unique applicable indices in range")
+        if self.flip_idx is not None and (
+            sorted(self.flip_idx) != list(range(count))
+            or any(self.flip_idx[self.flip_idx[index]] != index for index in range(count))
+        ):
+            raise ValueError("pose.flip_idx must be a complete involutive permutation")
+        for edge in self.skeleton:
+            if len(edge) != 2 or edge[0] == edge[1] or any(i < 0 or i >= count for i in edge):
+                raise ValueError("pose.skeleton edges require two distinct point indices in range")
+        return self
 
 
 class RunConfig(StrictModel):
@@ -71,6 +127,15 @@ class Config(StrictModel):
     image_format: Literal["jpeg", "png"] = "jpeg"
     jpeg_quality: int = Field(default=95, ge=1, le=100)
     coordinate_grid: bool = False
+    pose: PoseConfig | None = None
+
+    @model_validator(mode="after")
+    def matching_pose_mode(self) -> Self:
+        if (self.dataset.input_task == "pose") != (self.pose is not None):
+            raise ValueError("pose settings are required exactly when dataset.input_task is pose")
+        if self.pose is None and any(ref.scope != "annotation" for ref in self.references):
+            raise ValueError("Scoped references require dataset.input_task: pose")
+        return self
 
     @field_validator("annotation_rules")
     @classmethod
@@ -94,6 +159,19 @@ def local_path(value: str, base: Path) -> Path:
 def load_config(path: Path) -> Config:
     """Parse a local YAML without accessing credentials or the network."""
     return Config.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+def identity_config(config: Config) -> dict[str, JsonValue]:
+    """Preserve historical detection fingerprints while fully identifying pose runs."""
+    content: dict[str, JsonValue] = config.model_dump(mode="json")
+    if config.pose is None:
+        content.pop("pose", None)
+        references = content["references"]
+        if isinstance(references, list):
+            for reference in references:
+                if isinstance(reference, dict) and reference.get("scope") == "annotation":
+                    reference.pop("scope", None)
+    return content
 
 
 def credentials(config: APIConfig, base: Path) -> Credentials:

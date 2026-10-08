@@ -164,7 +164,7 @@ class RunStore:
                 raise ValueError("Successful state disagrees with annotation emptiness")
             if not unchanged(sample):
                 raise ValueError("Source changed before export")
-            text = label_text(result.boxes)
+            text = label_text(result.boxes, pose=data.pose)
             for split in sample.splits:
                 relative = Path(split) / sample.sample_id / sample.relative
                 image_relative = Path("images") / relative
@@ -178,7 +178,9 @@ class RunStore:
                     raise ValueError("Image changed during export")
                 atomic_write(stage / label_relative, text.encode())
                 parsed = load_boxes(
-                    stage / label_relative, data.names, reference=True, rounding_tolerance=1e-12
+                    stage / label_relative, data.names, reference=True, rounding_tolerance=1e-12,
+                    task=data.output_task, kpt_shape=data.kpt_shape if data.pose else None,
+                    pose=data.pose,
                 )
                 if len(parsed) != len(result.boxes):
                     raise ValueError("Exported label count differs")
@@ -198,6 +200,15 @@ class RunStore:
                     )
                 )
         configuration: dict[str, object] = {"path": ".", "names": data.names}
+        if data.pose is not None:
+            configuration["kpt_shape"] = data.pose.kpt_shape
+            configuration["kpt_names"] = {
+                class_id: data.pose.kpt_names for class_id in data.names
+            }
+            if data.pose.flip_idx is not None:
+                configuration["flip_idx"] = data.pose.flip_idx
+            if data.pose.skeleton:
+                configuration["skeleton"] = data.pose.skeleton
         for split, items in sorted(splits.items()):
             path = stage / f"{split}.txt"
             atomic_write(path, ("\n".join(items) + "\n").encode())

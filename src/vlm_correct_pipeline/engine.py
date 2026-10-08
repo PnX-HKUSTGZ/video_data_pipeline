@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 from .client import APIProblem, Backend, FunctionCall, Turn
 from .config import Config, RunConfig
 from .models import JSONObject, SampleResult, Usage, json_object
-from .render import image_item, message, observe, text_item
+from .render import focus_region, image_item, message, observe, text_item
 from .tools import AnnotationTools, ToolResult, tool_definitions
 
 type Recorder = Callable[[JSONObject], None]
@@ -103,7 +103,7 @@ def annotate(
     cancel: Event,
 ) -> SampleResult:
     """Only terminal tools create success; every edit must be followed by fresh vision input."""
-    tools = AnnotationTools(state, names)
+    tools = AnnotationTools(state, names, pose=config.pose)
     state.status = "running"
     content, metadata = observe(
         image,
@@ -113,6 +113,7 @@ def annotate(
         encoding=config.image_format,
         jpeg_quality=config.jpeg_quality,
         coordinate_grid=config.coordinate_grid,
+        pose=config.pose,
     )
     initial = tools.snapshot(role="editable_target", **metadata)
     history = [*prefix, message([text_item(json.dumps(initial, ensure_ascii=False)), *content])]
@@ -120,7 +121,7 @@ def annotate(
     seen: dict[str, tuple[FunctionCall, ToolResult, JSONObject]] = {}
     try:
         while state.status == "running":
-            turn = budget.request(backend, history, tool_definitions(), cancel, record)
+            turn = budget.request(backend, history, tool_definitions(config.pose), cancel, record)
             if cancel.is_set():
                 raise RunCancelled
             history.extend(turn.output)
@@ -150,11 +151,26 @@ def annotate(
                         encoding=config.image_format,
                         jpeg_quality=config.jpeg_quality,
                         coordinate_grid=config.coordinate_grid,
+                        pose=config.pose,
                     )
+                    if config.pose is not None and result.focus_box_id is not None:
+                        focus = next(b for b in state.boxes if b.box_id == result.focus_box_id)
+                        cropped, crop_metadata = observe(
+                            image, state.boxes, names, config.image_max_edge,
+                            region=focus_region(focus, config.pose),
+                            encoding=config.image_format, jpeg_quality=config.jpeg_quality,
+                            coordinate_grid=config.coordinate_grid, pose=config.pose,
+                        )
+                        content.extend([
+                            text_item("Detail of the edited instance; coordinates still refer to the FULL IMAGE."),
+                            *cropped,
+                        ])
+                        metadata["focus_region"] = crop_metadata
                     result = ToolResult(
                         json_object({**result.payload, **metadata}),
                         result.edited,
                         result.region,
+                        result.focus_box_id,
                     )
                 output = tool_output(call, result.payload, content)
                 seen[call.call_id] = (call, result, output)

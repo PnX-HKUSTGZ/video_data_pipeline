@@ -1,0 +1,168 @@
+api:
+  env_file: .env
+  base_url_env: BASE_URL
+  api_key_env: API_KEY
+  model: gpt-6-astra
+  timeout_seconds: 120
+  max_output_tokens: 8192
+  stream: true
+dataset:
+  source: ../../datasets/generated/rm26_two_stage/national_20261007_conf08_kpt05/data.yaml
+  names:
+    0: pillar
+    1: exchange
+  input_task: pose
+  selection_file: national_pose_smoke5.json
+  source_rounding_tolerance: 1.0e-06
+references:
+- image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/front.jpg
+  label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/front.txt
+  description: 正面权威样例，pillar 是移动兑换标记，exchange 框包含标记和科技核心整体。
+  scope: boxes
+- image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/left_45.jpg
+  label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/left_45.txt
+  description: 左侧 45 度权威样例。
+  scope: boxes
+- image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/right_45.jpg
+  label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/right_45.txt
+  description: 右侧 45 度权威样例。
+  scope: boxes
+- image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/train/up_45.jpg
+  label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/train/up_45.txt
+  description: 上方 45 度权威样例。
+  scope: boxes
+- image: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/images/val/down_45.jpg
+  label: ../../datasets/vlm_correct_pipeline/references/yolo_five_views_20261007/labels/val/down_45.txt
+  description: 下方 45 度权威样例；源数据的 val 划分在本任务中同样作为参考。
+  scope: boxes
+- image: ../../datasets/vlm_correct_pipeline/references/exchange_pose_visible5/images/val/val_frame_003488.jpg
+  label: ../../datasets/vlm_correct_pipeline/references/exchange_pose_visible5/labels/val/val_frame_003488.txt
+  scope: keypoints
+  description: val_frame_003488：只约束两类各自的关键点身份、点序和可见坐标，不使用本样例的检测框定义。11 个非 ring 关键点可见；ring 源标签为遮挡点，已规范为 0 0 0。
+- image: ../../datasets/vlm_correct_pipeline/references/exchange_pose_visible5/images/val/val_frame_002498.jpg
+  label: ../../datasets/vlm_correct_pipeline/references/exchange_pose_visible5/labels/val/val_frame_002498.txt
+  scope: keypoints
+  description: val_frame_002498：只约束两类各自的关键点身份、点序和可见坐标，不使用本样例的检测框定义。11 个非 ring 关键点可见；ring 源标签为遮挡点，已规范为 0 0 0。
+- image: ../../datasets/vlm_correct_pipeline/references/exchange_pose_visible5/images/val/val_frame_000395.jpg
+  label: ../../datasets/vlm_correct_pipeline/references/exchange_pose_visible5/labels/val/val_frame_000395.txt
+  scope: keypoints
+  description: val_frame_000395：只约束两类各自的关键点身份、点序和可见坐标，不使用本样例的检测框定义。11 个非 ring 关键点可见；ring 源标签为遮挡点，已规范为 0 0 0。
+- image: ../../datasets/vlm_correct_pipeline/references/exchange_pose_visible5/images/val/val_frame_000479.jpg
+  label: ../../datasets/vlm_correct_pipeline/references/exchange_pose_visible5/labels/val/val_frame_000479.txt
+  scope: keypoints
+  description: val_frame_000479：只约束两类各自的关键点身份、点序和可见坐标，不使用本样例的检测框定义。11 个非 ring 关键点可见；ring 源标签为遮挡点，已规范为 0 0 0。
+- image: ../../datasets/vlm_correct_pipeline/references/exchange_pose_visible5/images/val/val_frame_000607.jpg
+  label: ../../datasets/vlm_correct_pipeline/references/exchange_pose_visible5/labels/val/val_frame_000607.txt
+  scope: keypoints
+  description: val_frame_000607：只约束两类各自的关键点身份、点序和可见坐标，不使用本样例的检测框定义。11 个非 ring 关键点可见；ring 源标签为遮挡点，已规范为 0 0 0。
+annotation_rules: |
+  类别 0 pillar 是移动兑换标记，类别 1 exchange 是科技核心整体。
+  exchange 的框包含科技核心及其移动标记，允许与 pillar 框嵌套，不能将二者视为重复框删除。
+  按可见目标轮廓取紧致的轴对齐检测框。权威样例的掩码仅说明框的生成方式，不要求从真实照片恢复像素级分割掩码。
+    exchange 是样例中的六边形/盾形核心壳体及其移动标记，包含发光条和壳体可见侧面；不包含外部支撑柱、支撑座、围墙、机器人及机械臂。pillar 是核心正面带发光角点图案的小型移动标记面板，不是机器人夹爪或核心的支撑结构。
+    对遮挡或画面截断目标，只包围仍可见且可归属于目标的部分，不外推不可见轮廓。目标被分成多个可见片段时，用一个框覆盖这些可见片段；正常遮挡本身不是放弃理由。先用 inspect_region 看清局部，再尽力修正类别明确且可见范围可确定的框。
+  不根据背景或样例中的固定位置臆造目标；只有确认整图没有上述目标时才标记为空。
+  无法可靠判断类别、目标存在性或遮挡后的可见边界时，提交待复核。
+  源数据为比赛转播画面，左侧画中画和顶部队伍头像等 UI 区域不属于主视角标注范围。只标注主视角中实际存在的目标，不重复标注同一目标的画中画影像。
+  先检查目标区域光照。如果严重欠曝、眩光或过曝导致目标类别或可见边界无法可靠确定，使用 discard_image（poor_lighting），整张图片不进入输出数据集。不能因为背景偏暗而剔除目标仍清晰的图片，也不能把看不清误判成无目标。必要时查看局部裁剪；若并非光照问题而是证据不足，提交待复核。
+
+  依据权威样例，exchange 的上边界在六边形盾形壳体自身的顶部尖角/斜边。不要把核心背后或上方的弯曲管线、回环状支架、竖直立柱算进 exchange；它们不属于样例中的目标壳体。检查框边缘时沿盾形壳体的可见边缘，不沿周围安装结构。
+
+  本轮同时复核类别、检测框和所有适用关键点。检测框仅遵循 scope=boxes 的原五视角权威样例；scope=keypoints 样例只约束关键点，其源框不能用于改变 pillar 面板与 exchange 壳体的框定义。
+  关键点坐标全部使用完整原图的归一化 x,y；裁剪或缩放后不能改成裁剪坐标。点名是物体固定身份，不能随画面旋转按屏幕上下左右重新编号。
+  pillar 仅用 0..4：TL、TR、BL、BR、ring；exchange 仅用 5..11：light_BR、light_TR、shell_R、shell_M、shell_L、light_TL、light_BL。每个目标仍保留全部 12 个槽位，不适用槽位为 0 0 0。
+  只标可可靠定位且当前可见的点 v=2；不可见、遮挡、出画或位置不可靠时置为 x=0,y=0,v=0。禁止根据几何对称、模板形状、其他点或背景推断不可见点，禁止输出 v=1。ring 不等于四角中心，不可从四角计算；本组权威样例 ring 均不可见，已经置零。
+  原始框和关键点均是待复核草稿。对每个实例使用 set_keypoints 显式提交全部适用点，包括保留的可见点与不可见点的置零；未确认的点不能直接 finish_annotation。同类改框不平移或缩放关键点；改类别后必须重新确认新类全部适用点。
+  允许保留部分可靠可见点，其他点置零。任一真实存在的目标所有适用点均不能可靠定位时，整图 defer_annotation；若由严重欠曝、过曝或眩光造成则 discard_image(poor_lighting)。不能删除真实目标来规避此规则，也不能 mark_empty 来表示点不可见。
+  关键点不强制位于框内；若越框，检查点身份、可见性和可见目标框是否正确，不强行吸附或移动点。线段仅作点序显示，不代表遮挡点可推断或两组目标属于同一刚体。
+run:
+  image_concurrency: 2
+  max_model_calls: 30
+  max_retries: 3
+  max_consecutive_api_errors: 3
+image_max_edge: 1280
+image_format: jpeg
+jpeg_quality: 95
+output:
+  directory: ../../outputs/vlm_correct/national_pose_smoke5_c2
+coordinate_grid: true
+pose:
+  kpt_shape:
+  - 12
+  - 3
+  kpt_names:
+  - TL
+  - TR
+  - BL
+  - BR
+  - ring
+  - light_BR
+  - light_TR
+  - shell_R
+  - shell_M
+  - shell_L
+  - light_TL
+  - light_BL
+  class_keypoint_indices:
+    0:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    1:
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+  point_definitions:
+    TL: 移动 marker 面板的物体固定左上角，位于发光角点图案角点；Blender 初始坐标 (-0.040, 0.040, 0.012) m。
+    TR: 移动 marker 面板的物体固定右上角，位于发光角点图案角点；Blender 初始坐标 (0.040, 0.040, 0.012) m。
+    BL: 移动 marker 面板的物体固定左下角，位于发光角点图案角点；Blender 初始坐标 (-0.040, -0.040, 0.012) m。
+    BR: 移动 marker 面板的物体固定右下角，位于发光角点图案角点；Blender 初始坐标 (0.040, -0.040, 0.012) m。
+    ring: 移动 marker 的独立 ring 参考点；Blender 初始坐标 (0, 0, 0.112) m，沿柱轴离四角平面 100 mm，绝不是四角中心。仅自身可靠可见时标注；本组样例不可见，统一为 0 0
+      0。
+    light_BR: 科技核心固定外壳右侧灯条下端角点（物体固定右下）；Blender 初始坐标 (0.114870, 0.035953, 0) m。
+    light_TR: 科技核心固定外壳右侧灯条上端角点（物体固定右上）；Blender 初始坐标 (0.114870, 0.167312, 0) m。
+    shell_R: 科技核心固定外壳正面右上肩角参考点，严格按权威样例定位在正面折角，不取外围弧形灯带或背部最外轮廓；Blender 初始坐标 (0.084871, 0.276449, 0) m。
+    shell_M: 科技核心固定外壳正面上方中央角参考点，严格按权威样例的正面顶角定位，不取外围弧形灯带或背部最外轮廓最高点；Blender 初始坐标 (0, 0.325449, 0) m。
+    shell_L: 科技核心固定外壳正面左上肩角参考点，严格按权威样例定位在正面折角，不取外围弧形灯带或背部最外轮廓；Blender 初始坐标 (-0.084871, 0.276449, 0) m。
+    light_TL: 科技核心固定外壳左侧灯条上端角点（物体固定左上）；Blender 初始坐标 (-0.114870, 0.167312, 0) m。
+    light_BL: 科技核心固定外壳左侧灯条下端角点（物体固定左下）；Blender 初始坐标 (-0.114870, 0.035953, 0) m。
+  flip_idx:
+  - 1
+  - 0
+  - 3
+  - 2
+  - 4
+  - 11
+  - 10
+  - 9
+  - 8
+  - 7
+  - 6
+  - 5
+  skeleton:
+  - - 0
+    - 1
+  - - 1
+    - 3
+  - - 3
+    - 2
+  - - 2
+    - 0
+  - - 5
+    - 6
+  - - 6
+    - 7
+  - - 7
+    - 8
+  - - 8
+    - 9
+  - - 9
+    - 10
+  - - 10
+    - 11

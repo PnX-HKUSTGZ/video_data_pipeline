@@ -13,7 +13,7 @@
 | 仓库已有 YOLO 读取能力 | 已通过适配层复用 |
 | 工具执行、图片渲染、Responses 会话、恢复与导出 | 已实现，包含离线测试 |
 | Responses 连通性、多图及多轮工具调用验证 | `gpt-6-astra` 合成场景和完整五组权威样例上下文的两轮预检已通过；每次有待处理图片时仍执行预检 |
-| 真实场景标注质量评估 | national 的 32 张困难样本试处理及导出校验已完成，已视觉抽查；仍缺独立人工真值，不能据此报告整体准确率 |
+| 真实场景标注质量评估 | national 的 50 张限定处理已结束，并发 2；导出 31 张并通过完整性校验，完成 Codex 视觉检查及 5 张针对性重检；仍缺独立人工真值 |
 
 第一版支持 YOLO 轴对齐目标检测框，包括无标签图片的自动标注和已有标签的修正。可显式读取 pose 数据中的检测框，输出不含关键点的检测数据集，源 pose 文件保持原样。分割、旋转框、关键点修正、自动类别扩展、样例检索和人工编辑界面仍为未实现能力。
 
@@ -382,17 +382,38 @@ uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/co
 
 结果与终态以 `report.json`、`capability_probe.json` 和 `samples/` 为准；运行中报告可能仍是上一次尝试的终态，应结合 `run.json`、`progress.json` 与实际进程判断。网络异常和未完成草稿不会发布为训练数据。
 
-### 当前任务：限定 50 张
+### 已完成的限定任务：50 张，并发 2
 
 按用户最新要求，当前只处理 **50 张输入图片，并发为 2**，不继续派发全量数据。配置为 [config.national_50_c2.yaml](config.national_50_c2.yaml)，固定清单为 [national_50.json](national_50.json)：包含原有 32 张困难样本，另从其他视频中分散选取 18 张，共覆盖 50 个视频，train 37 张、val 13 张。这是定性检查样本，不是独立人工真值集或无偏随机样本。
 
-本次使用 `gpt-6-astra`、五组固定权威样例和 2 路图片并发，输出目录为 `outputs/vlm_correct/national_20261008_50_c2/`。图片逐一记录在 `samples/`，完成后发布到 `dataset/data.yaml`。光照剔除及待复核图片不导出，所以最终保留数量可能小于 50。当前运行已启动，终态及验收仍待实际完成后确认。运行和恢复使用同一配置：
+本次使用 `gpt-6-astra`、五组固定权威样例和 2 路图片并发，输出目录为 `outputs/vlm_correct/national_20261008_50_c2/`。**50 张均已处理至明确终态，最终导出 31 张**，入口为 [dataset/data.yaml](../../outputs/vlm_correct/national_20261008_50_c2/dataset/data.yaml)。检测数据含 train 23 张、val 8 张，共 57 个框（`pillar` 27 个、`exchange` 30 个），不含关键点。
+
+| 终态 | 图片数 | 导出行为 |
+| --- | ---: | --- |
+| `completed` | 30 | 导出图片及非空检测标签 |
+| `empty` | 1 | 导出图片及空标签；由模型明确确认无目标 |
+| `discarded` | 13 | 目标区域光照不足以可靠标注，排除整图 |
+| `deferred` | 6 | 目标与机械结构或 UI 遮挡后的边界无法可靠确定，排除整图，保留草稿与原因 |
+
+`progress.json` 为 `finished`，剩余图片和待重检数量均为 0；`report.json` 的 `not_processed` 为空，没有 API 失败、调用超限或仍在运行的图片。运行总状态仍为 `partial`，表示 6 张待复核图片没有完成标注，不表示后台仍在处理。所有 19 张排除图片及逐图原因见 [exclusions.json](../../outputs/vlm_correct/national_20261008_50_c2/exclusions.json)，完整结果见 [report.json](../../outputs/vlm_correct/national_20261008_50_c2/report.json)。原 pose 数据保留。
+
+目标图片各次尝试和网络重试累计 **253 次请求**，服务端已返回的用量合计 3,526,881 输入 token、20,190 输出 token；能力探测另计，失败请求可能没有返回 token 用量。未额外处理清单外图片。
+
+首轮结果经 Codex 视觉检查后，将 5 张可能有误的图片附带具体观察反馈重新交给 Responses 模型核验；所有最终标签仍由模型通过既定工具提交，没有直接手写修正坐标。重检纠正了一张误判为空的图片，恢复漏掉的标记，调整核心框的上边界，并将一张边界不明的图片转为 `deferred`。最终五张原图／带框局部对照和检查记录位于 [review/final-visual-review.json](../../outputs/vlm_correct/national_20261008_50_c2/review/final-visual-review.json)。`review/positive-*.jpg` 是首轮修正前的对照图，最终结果以当前标签和 `review/final-*.jpg` 为准。
+
+这是本批数据的一次针对性质量检查，**尚未实现通用自动质量门禁**。视觉检查由 Codex 完成，不是独立人工真值评估；这批样本包含刻意选择的困难图，不能据此推算全量剔除率，也未测得类别准确率、漏检率或 IoU 的改善。
+
+主运行请求超时为 120 秒；针对性重检遇到网络超时后，仅最后一次重检将请求时限改为 300 秒，图片并发始终为 2。重检复用了同一端点与配置已通过的多轮能力探测。反馈、运行脚本副本及 SHA-256、重检前快照、探测来源和超时覆盖值均记入 `review/targeted-recheck-102334/`，并由 `run.json`／`report.json` 的 `quality_review` 引用；早期失败尝试继续保留用于追溯。
+
+[full-verification.json](../../outputs/vlm_correct/national_20261008_50_c2/full-verification.json) 已在最终重检发布后通过：核对全部 50 张源输入指纹和 split、权威样例、终态工具与事件、检查点、请求用量、31 组导出文件的内容与哈希、独立图片副本、5 列检测标签、显式负样本、排除清单，以及现有 YOLO 浏览器加载结果。临时目录为空；校验脚本副本保存在 `review/final-verifier.py`。另有全量 23,620 张原图和 pose 标签的源完整性复核，以及全部 15 个权威样例文件的原目录／副本哈希复核，记录分别为 `review/full-source-integrity.json`、`review/reference-reverification.json`。
+
+执行本轮使用以下命令。当前任务已结束，查看结果直接打开导出 YAML；再次运行会重新尝试 `deferred` 图片并更新结果，不是只读查询：
 
 ```bash
 uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/config.national_50_c2.yaml
 ```
 
-此前四路的 50 张尝试 `outputs/vlm_correct/national_20261008_50/` 在多轮预检第二轮连续遇到 HTTP 504，未开始目标图片处理，也未发布数据集。该目录及原配置保留用于诊断。元数据端点可访问并列出 `gpt-6-astra`，这不代表 Responses 多轮能力已经恢复。
+此前四路的 50 张尝试 `outputs/vlm_correct/national_20261008_50/` 在多轮预检第二轮连续遇到 HTTP 504，未开始目标图片处理，也未发布数据集。该目录及原配置保留用于诊断；本轮有效结果以 `national_20261008_50_c2/` 为准。
 
 ### 已停止的全量尝试
 

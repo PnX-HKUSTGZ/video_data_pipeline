@@ -16,6 +16,7 @@
 | 工具执行、图片渲染、Responses 会话、恢复与导出 | 已实现，包含离线测试 |
 | Responses 连通性、多图及多轮工具调用验证 | `gpt-6-astra` 合成场景和完整五组权威样例上下文的两轮预检已通过；每次有待处理图片时仍执行预检 |
 | 真实场景标注质量评估 | national 的 50 张限定处理已结束，并发 2；导出 31 张并通过完整性校验，完成 Codex 视觉检查及 5 张针对性重检；仍缺独立人工真值 |
+| 真实 pose 批次 | 固定 100 张已检查至明确终态，并发 2；导出 21 张，19 张光照剔除、60 张待复核，完整性与视觉检查完成；无独立人工关键点真值 |
 
 支持 YOLO 轴对齐检测框及 `[K,3]` pose，包括无标签图片的自动标注和已有标签的修正。`pose_boxes` 仍仅提取检测框，`pose` 才联合修正并导出关键点，源文件保持原样。分割、旋转框、二维无可见性字段的 pose、遮挡点推断、三维位姿解算、自动类别扩展、样例检索和人工编辑界面仍为未实现能力。
 
@@ -523,3 +524,31 @@ pose 使用运行格式版本 2，点定义、作用范围和适配参考的哈�
 全部 50 张及其目标局部已完成视觉查看，共 130 张原图／标注对照，记录与最终检查点和图片哈希绑定，见 [visual-review.json](../../outputs/vlm_correct/national_pose_50_c2/review/visual-review.json)。未发现证据明确、必须重跑的错误；`a6894207d5bf` 在倾斜视角下的壳体顶点身份仍建议人工抽检，逐图意见保留在三个 `visual-part*.json` 中。
 
 本轮待复核比例较高，主要涉及遮挡、UI 重叠及目标边界或点身份不可靠；允许部分可见点并不代表可以忽略无法确定的实例边界。视觉检查属于 Codex 定性复核，不能代替独立人工真值，也不能据此宣称定位精度提高。
+
+### 固定 100 张 pose 运行结果
+
+配置为 [config.national_pose_100_c2.yaml](config.national_pose_100_c2.yaml)，清单为 [national_100.json](national_100.json)。保留原 50 张，再从未入选、同时包含 train／val 图片的视频中按排序等间隔选 50 个视频，每个视频选择指定 split 的排序中间帧。新增为 train 38、val 12，合计 train 75、val 25，覆盖 100 个不同视频；没有按标签或光照预筛选，仍不是无偏随机评估集。选样算法及哈希保存在输出的 `review/selection-provenance.json`。
+
+```bash
+uv run --locked --extra vlm vlm-correct run --config src/vlm_correct_pipeline/config.national_pose_100_c2.yaml
+```
+
+2026-10-09，全部 100 张从原始 pose 标签重新检查至明确终态，沿用十组参考、点定义与可见性规则，使用 `gpt-6-astra`、并发 2、每张每次尝试最多 30 次请求、最多 3 次临时故障重试。目标图与局部反馈最长边 1280，参考图最长边 768，JPEG 质量 90。结果独立保存在 `outputs/vlm_correct/national_pose_100_c2/`，原 50 张结果保留。
+
+| 最终状态 | 图片数 | 是否导出 |
+| --- | ---: | --- |
+| `completed` 正样本 | 19 | 是 |
+| `empty` 确认无目标 | 2 | 是，空标签 |
+| `discarded` 光照剔除 | 19 | 否 |
+| `deferred` 待人工复核 | 60 | 否 |
+| API 失败、调用超限、未处理 | 0 | 否 |
+
+成功数据集为 [dataset/data.yaml](../../outputs/vlm_correct/national_pose_100_c2/dataset/data.yaml)：**21 张图片，train 19、val 2，33 个实例，150 个可见适用关键点**。所有非空标签均为 41 列、可见性仅为 0/2；没有把未确认草稿或光照剔除图片转为空标签。100 张输入不等于 100 张成功标注。运行总状态为 `partial`，表示仍有 60 张待复核；`progress.json` 的阶段为 `finished`，不是后台仍在运行。
+
+首轮有 2 张接口失败，之后仅对这 2 张从源标签重新处理，均得到 `completed`；其余 98 张逻辑结论及用量保持不变。恢复前报告、目标清单、执行脚本及哈希保存在 `review/transport-recovery-*/`。目标处理含恢复共 **299 次请求、7,188,827 输入 token、21,802 输出 token**，记录了 27 次 API 错误事件；完整参考上下文预检另计 3 次请求、35,513 输入 token、79 输出 token。重跑上述普通 `run` 命令会重新处理 `deferred`；查看现有结果直接打开数据集或报告即可。
+
+[完整性核验](../../outputs/vlm_correct/national_pose_100_c2/full-verification.json) 已通过：检查全部 100 张源图片／标签与 split、运行身份和 20 个参考文件、显式终态工具、事件／检查点／报告与请求用量一致性、21 组导出图片和标签、关键点逐点确认、独立副本、元数据以及现有 YOLO 浏览器读取。[最终审计](../../outputs/vlm_correct/national_pose_100_c2/review/final-audit.json) 还核对运行前后的全部源文件哈希、原 50 张输入身份、旧运行报告与旧导出文件，确认原数据与旧结果未变，临时目录为空且无遗留标注进程。
+
+全部 100 张及其全部实例局部已完成 Codex 定性视觉检查，共 249 张原图／标注对照：65 张输入逐张打开整图与局部（包含全部 21 张成功输出），另 35 张排除图片通过包含整图和全部局部的联系表检查。记录绑定最终检查点和图片哈希，见 [visual-inspection.json](../../outputs/vlm_correct/national_pose_100_c2/review/visual-inspection.json)。未发现证据明确、需要再次调用模型修正的导出错误；细微边界与关键点偏差没有独立人工真值量化。
+
+本轮待复核比例高，模型对遮挡、UI 覆盖、壳体边界和实例身份判断较保守；其中一些图片仍有清晰局部点，不能把待复核解释成完全不可标注。光照剔除也可能只涉及某个必需目标或其边界，而其他局部仍然可见。完整逐图结论见 [report.json](../../outputs/vlm_correct/national_pose_100_c2/report.json)，79 张排除图片及原因见 [exclusions.json](../../outputs/vlm_correct/national_pose_100_c2/exclusions.json)。本批次验证流程与定性视觉效果，不宣称关键点定位精度或准确率提高。
